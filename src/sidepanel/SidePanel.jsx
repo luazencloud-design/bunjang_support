@@ -731,15 +731,23 @@ function SidePanel({ tweaks }){
             )}
           </div>
 
-          {/* 상품 상태 */}
+          {/* 상품 상태 — 번개장터 실제 값과 동일 */}
           <div className="sp-field">
             <label className="sp-label">상품 상태</label>
-            <div style={{display:'flex', gap:6}}>
-              {['새상품','거의새것','중고'].map(c => (
-                <button key={c}
-                  className={`sp-btn sm ${(product.condition ?? '새상품') === c ? 'primary' : ''}`}
-                  onClick={() => setProduct({...product, condition: c})}>
-                  {c}
+            <div style={{display:'flex', gap:5, flexWrap:'wrap'}}>
+              {[
+                ['새 상품 (미사용)', '새상품'],
+                ['사용감 없음',      '없음'],
+                ['사용감 적음',      '적음'],
+                ['사용감 많음',      '많음'],
+                ['고장/파손 상품',   '파손'],
+              ].map(([value, label]) => (
+                <button key={value}
+                  className={`sp-btn sm ${(product.condition ?? '새 상품 (미사용)') === value ? 'primary' : ''}`}
+                  style={{flex:'0 0 auto'}}
+                  title={value}
+                  onClick={() => setProduct({...product, condition: value})}>
+                  {label}
                 </button>
               ))}
             </div>

@@ -99,17 +99,18 @@ async function injectTags(tags: string[]): Promise<InjectResult> {
   return { field: 'tags', ok: true, selector: SELECTORS.tag[0] };
 }
 
-// 상품 상태 버튼 클릭
-// NOTE: 로그인 없이는 DOM에 렌더되지 않아 selector 미검증. 로그인 후 F12로 확인 필요.
-// 현재는 "상품상태" 레이블 옆에서 텍스트 매칭으로 시도.
-function findConditionButton(conditionText: string): HTMLElement | null {
-  const label = [...document.querySelectorAll('div,span')].find(
+// 상품 상태 radio — 2026-04-23 검증
+// 구조: label > input[type="radio"] + 텍스트노드("새 상품 (미사용)") + span(설명)
+// label.textContent는 "새 상품 (미사용)사용하지 않은 새 상품" 형태라 startsWith로 비교
+function findConditionRadio(conditionText: string): HTMLInputElement | null {
+  const sectionLabel = [...document.querySelectorAll('div,span')].find(
     el => el.children.length === 0 && el.textContent?.trim() === '상품상태'
   );
-  const group = label?.closest('[class*="ProductNewstyle__Group"]');
+  const group = sectionLabel?.closest('[class*="ProductNewstyle__Group"]');
   if (!group) return null;
-  const allEls = [...group.querySelectorAll<HTMLElement>('button, [role="button"], div[class*="Button"], span[class*="Button"]')];
-  return allEls.find(el => el.textContent?.trim() === conditionText) ?? null;
+  const condLabels = [...group.querySelectorAll<HTMLLabelElement>('label')];
+  const matched = condLabels.find(l => l.textContent?.trim().startsWith(conditionText));
+  return (matched?.querySelector('input[type="radio"]') as HTMLInputElement) ?? null;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -194,15 +195,14 @@ async function injectProduct(product: Product): Promise<InjectResult[]> {
     results.push(await injectTags(product.tags));
   }
 
-  // 상품 상태 (기본값: 새상품)
-  const condition = product.condition ?? '새상품';
-  const condBtn = findConditionButton(condition);
-  if (condBtn) {
-    condBtn.click();
-    results.push({ field: 'condition', ok: true, selector: `상품상태 그룹 내 "${condition}" 버튼` });
+  // 상품 상태 (기본값: 새 상품 (미사용))
+  const condition = product.condition ?? '새 상품 (미사용)';
+  const condRadio = findConditionRadio(condition);
+  if (condRadio) {
+    condRadio.click();
+    results.push({ field: 'condition', ok: true, selector: `상품상태 label startsWith "${condition}"` });
   } else {
-    // selector 미검증 상태 — 실패로 기록하되 주입은 계속 진행
-    results.push({ field: 'condition', ok: false, error: `"${condition}" 버튼 못 찾음 (로그인 후 selector 검증 필요)` });
+    results.push({ field: 'condition', ok: false, error: `상품상태 radio 못 찾음: "${condition}"` });
   }
 
   // 카테고리

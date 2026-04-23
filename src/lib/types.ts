@@ -16,7 +16,8 @@ export interface Product {
   feature?: string;
   quantity?: number;
   tags?: string[];                 // 태그 (최대 5개)
-  condition?: '새상품' | '거의새것' | '중고';  // 상품 상태
+  // 상품 상태 — 번개장터 실제 label 텍스트와 동일 (2026-04-23 검증)
+  condition?: '새 상품 (미사용)' | '사용감 없음' | '사용감 적음' | '사용감 많음' | '고장/파손 상품';
   shipping?: '배송비포함' | '배송비별도';
   inPerson?: boolean;             // 직거래 가능 여부
   createdAt: number;

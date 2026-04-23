@@ -499,6 +499,31 @@ function SidePanel({ tweaks }){
   const [aiLoading, setAiLoading] = useStateSP(false);
   const [tplActive, setTplActive] = useStateSP(0);
 
+  // ── Phase 1: 실제 메시지 연결 ──
+  const [injecting, setInjecting] = useStateSP(false);
+  const [diagResults, setDiagResults] = useStateSP(null); // null = 미실행
+  const [currentUrl, setCurrentUrl] = useStateSP('');
+  const [isBunjang, setIsBunjang] = useStateSP(false);
+
+  // 현재 탭 URL 초기화 + tab:url 메시지 수신
+  useEffectSP(() => {
+    if (typeof chrome === 'undefined' || !chrome.tabs) return;
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+      if (tab?.url) {
+        setCurrentUrl(tab.url);
+        setIsBunjang(tab.url.includes('bunjang.co.kr'));
+      }
+    });
+    const onMessage = (msg) => {
+      if (msg?.type === 'tab:url') {
+        setCurrentUrl(msg.url);
+        setIsBunjang(msg.isBunjang);
+      }
+    };
+    chrome.runtime.onMessage.addListener(onMessage);
+    return () => chrome.runtime.onMessage.removeListener(onMessage);
+  }, []);
+
   const margin = useMemoSP(()=>{
     const c = product.cost * fx;
     const fee = product.price * feeRate;
@@ -510,6 +535,31 @@ function SidePanel({ tweaks }){
   function showToast(msg){
     setToast(msg);
     setTimeout(()=>setToast(null), 1600);
+  }
+
+  async function handleInject() {
+    if (injecting) return;
+    if (typeof chrome === 'undefined' || !chrome.runtime) {
+      showToast('Chrome 확장 컨텍스트에서만 사용 가능');
+      return;
+    }
+    setInjecting(true);
+    setDiagResults(null);
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'inject', product });
+      if (response?.results) {
+        setDiagResults(response.results);
+        const ok = response.results.filter(r => r.ok).length;
+        const total = response.results.length;
+        showToast(`자동입력 완료 ${ok}/${total} 성공`);
+      } else {
+        showToast('응답 없음 — content script 확인 필요');
+      }
+    } catch (e) {
+      showToast('오류: ' + (e?.message || String(e)));
+    } finally {
+      setInjecting(false);
+    }
   }
 
   const AI = [
@@ -555,15 +605,19 @@ function SidePanel({ tweaks }){
 
       {/* Status strip — shows connected page */}
       <div className="sp-status-strip">
-        <div className="sp-live-dot"/>
-        <span>m.bunjang.co.kr/products/new</span>
-        <span style={{marginLeft:'auto', color:'var(--success)'}}>● 연결됨</span>
+        <div className="sp-live-dot" style={!isBunjang ? {background:'var(--ink-3)', boxShadow:'none', animation:'none'} : {}}/>
+        <span style={{overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', flex:1}}>
+          {currentUrl ? (() => { try { const u = new URL(currentUrl); return u.hostname + u.pathname; } catch { return currentUrl; } })() : '탭 감지 중…'}
+        </span>
+        <span style={{marginLeft:8, flexShrink:0, color: isBunjang ? 'var(--success)' : 'var(--ink-3)'}}>
+          {isBunjang ? '● 연결됨' : '○ 미연결'}
+        </span>
       </div>
 
       {/* Persistent action bar (always visible) */}
       <div className="sp-actionbar">
-        <button className="sp-btn accent" style={{flex:1}} onClick={()=>showToast('번개장터 자동입력 시작')}>
-          {SPI.cart()} 번개장터 자동입력
+        <button className="sp-btn accent" style={{flex:1, opacity: injecting ? 0.7 : 1}} onClick={handleInject} disabled={injecting}>
+          {injecting ? <>{SPI.spin()} 주입 중…</> : <>{SPI.cart()} 번개장터 자동입력</>}
         </button>
       </div>
 
@@ -714,26 +768,33 @@ function SidePanel({ tweaks }){
         </SPSection>
 
         {/* Diagnosis — open by default, key value of side panel */}
-        <SPSection title="마지막 자동입력 진단" meta={<span className="sp-chip success">4/6 성공</span>}>
+        <SPSection title="마지막 자동입력 진단" meta={
+          diagResults
+            ? <span className={`sp-chip ${diagResults.filter(r=>r.ok).length === diagResults.length ? 'success' : diagResults.some(r=>r.ok) ? 'accent' : 'danger'}`}>
+                {diagResults.filter(r=>r.ok).length}/{diagResults.length} 성공
+              </span>
+            : <span className="sp-chip">미실행</span>
+        }>
           <div className="sp-diag">
-            {[
-              ['상품명', 'ok', 'input[name="name"]'],
-              ['가격', 'ok', 'input[type="number"]'],
-              ['설명', 'ok', 'textarea[name="description"]'],
-              ['이미지', 'ok', '3/3 업로드'],
-              ['카테고리', 'fail', '수동 선택 필요'],
-              ['배송비', 'fail', '수동 선택 필요'],
-            ].map(([l,s,v],i)=>(
+            {diagResults ? diagResults.map((r, i) => (
               <div key={i} className="sp-diag-row">
-                <div className={`sp-diag-st ${s}`}>{s==='ok'?SPI.check():SPI.x()}</div>
-                <div className="sp-diag-label">{l}</div>
-                <div className="sp-diag-val">{v}</div>
+                <div className={`sp-diag-st ${r.ok ? 'ok' : 'fail'}`}>{r.ok ? SPI.check() : SPI.x()}</div>
+                <div className="sp-diag-label">{r.field}</div>
+                <div className="sp-diag-val" style={{maxWidth:140, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}} title={r.selector || r.error}>
+                  {r.selector || r.error || ''}
+                </div>
               </div>
-            ))}
+            )) : (
+              <div className="sp-diag-row" style={{justifyContent:'center', color:'var(--ink-3)', fontSize:11}}>
+                자동입력 버튼을 누르면 결과가 표시됩니다
+              </div>
+            )}
           </div>
-          <div className="sp-hint" style={{marginTop:8}}>
-            실패한 필드는 해당 위치로 스크롤됩니다 →
-          </div>
+          {diagResults && (
+            <div className="sp-hint" style={{marginTop:8}}>
+              {diagResults.filter(r=>!r.ok).length > 0 ? `실패 ${diagResults.filter(r=>!r.ok).length}개 — 해당 필드는 수동으로 입력해주세요` : '모든 필드 주입 성공 ✓'}
+            </div>
+          )}
         </SPSection>
 
         {/* Recent */}

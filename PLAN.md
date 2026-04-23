@@ -472,31 +472,34 @@ export const storage = {
 - Vite + React + TS + @crxjs 골격 빌드 통과
 - 사이드패널 UI 디자인 그대로 렌더 (검정 로고/컬러로 커스터마이즈됨)
 - 모바일 PWA UI 디자인 그대로 렌더
-- 백그라운드: action 클릭 → 사이드패널 오픈
 - 마진 계산 (실제 동작)
 - 템플릿 클릭 → 설명에 삽입 (실제 동작)
 - 탭 전환 (모바일)
 - localtunnel/ngrok 허용 (`allowedHosts: true`)
+- **`src/lib/types.ts`** — Product / Template / Settings / ExtMessage / InjectResult 타입
+- **`src/lib/storage.ts`** — chrome.storage.local 래퍼 (draft / templates / settings / history)
+- **`src/lib/messaging.ts`** — 타입 안전 메시지 헬퍼
+- **`src/content/bunjang.ts`** — SELECTORS 실 검증 완료 (2026-04-23), 메시지 리스너, 필드 주입 함수
+- **`src/background/service-worker.ts`** — inject 메시지 라우팅, 탭 URL 변경 감지
+- **`src/sidepanel/SidePanel.jsx`** — 자동입력 버튼 실 연결, 진단 섹션 실데이터, 상태 스트립 실 URL
 
 ### ⚠️ Mock / 가짜 동작
-- AI 추천 → 하드코딩 5개 응답
-- 자동입력 버튼 → 토스트만 뜸
-- 진단 섹션 → 하드코딩 4 성공 / 2 실패
+- AI 추천 → 하드코딩 5개 응답 (Phase 2에서 Claude API 연결)
 - 모바일 바코드 스캔 → setTimeout 시뮬레이션
 - 모바일 사진 → SVG 패턴 placeholder
+- 이미지 자동입력 → "Phase 2 구현 예정" 메시지 반환
 
 ### ❌ 아예 없음
-- 번개장터 셀렉터 실제 검증
-- 사이드패널 ↔ content script 메시징
 - Claude API 실제 호출
-- 이미지 업로드 (드래그/IndexedDB)
-- 입력값 영속화
+- 이미지 드래그앤드롭 + IndexedDB 저장
+- 입력값 chrome.storage 영속화 (자동 저장)
 - 실제 카메라 (`getUserMedia`)
 - ZXing 바코드 인식
 - 메루카리 검색 연결
 - PWA 매니페스트 (홈 화면 추가)
 - 확장 아이콘 PNG
-- 에러 처리 일반
+- API 키 입력 UI
+- 사용자 정의 템플릿 추가/수정/삭제
 
 ---
 

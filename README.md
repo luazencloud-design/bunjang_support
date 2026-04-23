@@ -2,7 +2,7 @@
 
 Chrome **Side Panel** 확장 + 모바일 PWA 스캐너.
 
-> 디자인은 Claude Design 산출물 (`design_extract/`) 그대로, 코드는 Vite + React + TS + @crxjs로 새로 짜는 중. 자세한 배경은 `PROJECT_HANDOFF.md` 참고.
+> 디자인은 Claude Design 산출물 (`design_extract/`) 그대로, 코드는 Vite + React + TS + @crxjs로 새로 짜는 중. 자세한 배경은 [`docs/PROJECT_HANDOFF.md`](docs/PROJECT_HANDOFF.md) 참고.
 
 ---
 
@@ -13,15 +13,23 @@ bunjang/
 ├── manifest.json              ← Chrome MV3 매니페스트 (sidePanel)
 ├── vite.config.ts             ← 확장 빌드 (@crxjs)
 ├── vite.mobile.config.ts      ← 모바일 PWA 빌드 (별도)
+├── docs/
+│   ├── PLAN.md               ← 기술 스택/아키텍처/작업 계획 (단일 진실)
+│   ├── PROJECT_HANDOFF.md    ← 프로젝트 배경/인수인계
+│   └── ISSUES.md             ← 이슈 추적
 ├── src/
 │   ├── sidepanel/
 │   │   ├── index.html
 │   │   ├── main.tsx
 │   │   └── SidePanel.jsx     ← 디자인 그대로 (React import만 추가)
 │   ├── background/
-│   │   └── service-worker.ts ← action 클릭 시 사이드패널 오픈
+│   │   └── service-worker.ts ← 메시지 라우팅, 탭 감지
 │   ├── content/
-│   │   └── bunjang.ts        ← 번개장터 DOM 주입 (TODO)
+│   │   └── bunjang.ts        ← 번개장터 DOM 주입
+│   ├── lib/
+│   │   ├── types.ts          ← 공용 타입
+│   │   ├── storage.ts        ← chrome.storage 래퍼
+│   │   └── messaging.ts      ← 메시지 헬퍼
 │   └── mobile/
 │       ├── index.html
 │       ├── main.tsx

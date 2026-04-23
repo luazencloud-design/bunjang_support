@@ -1,0 +1,90 @@
+// 공용 타입 정의 — 사이드패널 / content script / background 모두 import해서 사용
+
+// ────────────────────────────────────────────────────────────────────
+// 상품
+// ────────────────────────────────────────────────────────────────────
+export interface Product {
+  id: string;                     // Date.now().toString() 또는 ulid
+  title: string;
+  cost: number;                   // 원가 (엔)
+  price: number;                  // 판매가 (원)
+  desc: string;                   // 상품 설명
+  imgs: string[];                 // IndexedDB 키 목록 (base64 직접 저장 금지)
+  brand?: string;
+  model?: string;
+  category?: string;
+  feature?: string;
+  quantity?: number;
+  tags?: string[];                 // 태그 (최대 5개)
+  // 상품 상태 — 번개장터 실제 label 텍스트와 동일 (2026-04-23 검증)
+  condition?: '새 상품 (미사용)' | '사용감 없음' | '사용감 적음' | '사용감 많음' | '고장/파손 상품';
+  shipping?: '배송비포함' | '배송비별도';
+  inPerson?: boolean;             // 직거래 가능 여부
+  createdAt: number;
+  registeredAt?: number;          // 번개장터 등록 완료 시각
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 템플릿
+// ────────────────────────────────────────────────────────────────────
+export interface Template {
+  id: string;
+  name: string;
+  text: string;
+  builtin: boolean;               // 기본 6개는 true, 사용자 정의는 false
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 사용자 설정
+// ────────────────────────────────────────────────────────────────────
+export interface Settings {
+  apiKey?: string;                // Claude API 키 (사용자 본인)
+  model: 'haiku' | 'sonnet';
+  fxRate: number;                 // 환율 (기본 9.3)
+  shipping: number;               // 배송비 (기본 3500)
+  feeRate: number;                // 수수료율 (기본 0.03)
+  dark: boolean;
+  accent: string;                 // CSS 컬러 (기본 '#151515')
+  autoScan: boolean;              // PWA 자동 스캔
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  model: 'haiku',
+  fxRate: 9.3,
+  shipping: 3500,
+  feeRate: 0.03,
+  dark: false,
+  accent: '#151515',
+  autoScan: true,
+};
+
+// ────────────────────────────────────────────────────────────────────
+// AI 응답
+// ────────────────────────────────────────────────────────────────────
+export interface AITitle {
+  style: string;
+  title: string;
+  len: number;
+}
+
+export interface AITitleResponse {
+  titles: AITitle[];
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 자동입력 결과 (content script → background → sidepanel)
+// ────────────────────────────────────────────────────────────────────
+export interface InjectResult {
+  field: string;
+  ok: boolean;
+  selector?: string;
+  error?: string;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 컨텍스트 간 메시지 타입
+// ────────────────────────────────────────────────────────────────────
+export type ExtMessage =
+  | { type: 'inject';        product: Product }
+  | { type: 'inject:result'; results: InjectResult[] }
+  | { type: 'tab:url';       url: string; isBunjang: boolean };

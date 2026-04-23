@@ -5,6 +5,7 @@
   "description": "번개장터 자동입력 사이드 패널 (Side Panel)",
   "permissions": [
     "storage",
+    "tabs",
     "activeTab",
     "scripting",
     "clipboardWrite",

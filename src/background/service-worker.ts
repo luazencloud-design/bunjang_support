@@ -23,23 +23,27 @@ chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
   if (!isExtMessage(msg)) return;
 
   if (msg.type === 'inject') {
-    // SidePanel에서 온 inject 요청 → 활성 탭의 content script로 전달
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    // currentWindow 대신 lastFocusedWindow — 서비스 워커엔 "현재 창" 개념 없음
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, ([tab]) => {
+      console.log('[SW] inject 수신, 탭:', tab?.id, tab?.url);
+
       if (!tab?.id) {
         sendResponse({ type: 'inject:result', results: [{ field: 'all', ok: false, error: '활성 탭 없음' }] });
         return;
       }
 
-      // 번개장터 페이지인지 확인
       if (!tab.url?.includes('bunjang.co.kr')) {
-        sendResponse({ type: 'inject:result', results: [{ field: 'all', ok: false, error: '번개장터 페이지가 아님. 현재 URL: ' + tab.url }] });
+        sendResponse({ type: 'inject:result', results: [{ field: 'all', ok: false, error: '번개장터 페이지가 아님: ' + tab.url }] });
         return;
       }
 
+      console.log('[SW] content script에 sendMessage 시도, tabId:', tab.id);
       chrome.tabs.sendMessage(tab.id, msg, (response) => {
         if (chrome.runtime.lastError) {
+          console.error('[SW] sendMessage 실패:', chrome.runtime.lastError.message);
           sendResponse({ type: 'inject:result', results: [{ field: 'all', ok: false, error: 'content script 연결 실패: ' + chrome.runtime.lastError.message }] });
         } else {
+          console.log('[SW] content script 응답:', response);
           sendResponse(response);
         }
       });

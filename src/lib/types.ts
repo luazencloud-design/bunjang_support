@@ -15,6 +15,8 @@ export interface Product {
   category?: string;
   feature?: string;
   quantity?: number;
+  tags?: string[];                 // 태그 (최대 5개)
+  condition?: '새상품' | '거의새것' | '중고';  // 상품 상태
   shipping?: '배송비포함' | '배송비별도';
   inPerson?: boolean;             // 직거래 가능 여부
   createdAt: number;

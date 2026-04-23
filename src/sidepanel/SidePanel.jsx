@@ -679,6 +679,42 @@ function SidePanel({ tweaks }){
             <textarea className="sp-textarea" style={{minHeight:80}} value={product.desc}
               onChange={e=>setProduct({...product, desc:e.target.value})}/>
           </div>
+
+          {/* 태그 */}
+          <div className="sp-field">
+            <label className="sp-label">
+              태그
+              <span style={{marginLeft:'auto', fontSize:10, color:'var(--ink-3)'}}>최대 5개 · 쉼표로 구분</span>
+            </label>
+            <input className="sp-input"
+              placeholder="예: 일본직구, 정품, 아디다스"
+              value={(product.tags || []).join(', ')}
+              onChange={e => {
+                const tags = e.target.value.split(',').map(t => t.trim()).filter(Boolean).slice(0, 5);
+                setProduct({...product, tags});
+              }}/>
+            {(product.tags || []).length > 0 && (
+              <div style={{display:'flex', gap:4, flexWrap:'wrap', marginTop:4}}>
+                {(product.tags || []).map((t,i) => (
+                  <span key={i} className="sp-chip accent" style={{fontSize:10}}>#{t}</span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 상품 상태 */}
+          <div className="sp-field">
+            <label className="sp-label">상품 상태</label>
+            <div style={{display:'flex', gap:6}}>
+              {['새상품','거의새것','중고'].map(c => (
+                <button key={c}
+                  className={`sp-btn sm ${(product.condition ?? '새상품') === c ? 'primary' : ''}`}
+                  onClick={() => setProduct({...product, condition: c})}>
+                  {c}
+                </button>
+              ))}
+            </div>
+          </div>
         </SPSection>
 
         {/* Margin */}

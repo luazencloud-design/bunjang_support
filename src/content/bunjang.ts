@@ -47,6 +47,11 @@ const SELECTORS = {
   quantity: [
     'input[placeholder="숫자만 입력해 주세요."]',
   ],
+  // 태그 — 2026-04-23 검증
+  tag: [
+    'input[placeholder="태그를 입력해 주세요. (최대 5개)"]',
+    'input[placeholder*="태그"]',
+  ],
   inPersonYes: ['input#in-person'],
   inPersonNo:  ['input#not-in-person'],
 } as const;
@@ -71,6 +76,40 @@ function findShippingRadio(type: ShippingType): HTMLInputElement | null {
 function findCategoryButton(name: string): HTMLButtonElement | null {
   const btns = [...document.querySelectorAll<HTMLButtonElement>('button[class*="CategoryBoxstyle__CategoryButton"]')];
   return btns.find(b => b.textContent?.trim() === name) ?? null;
+}
+
+// 태그 입력 — setNativeValue 후 Enter 키 이벤트로 태그 추가
+async function injectTags(tags: string[]): Promise<InjectResult> {
+  const input = findFirst(SELECTORS.tag) as HTMLInputElement | null;
+  if (!input) {
+    return { field: 'tags', ok: false, error: '태그 input을 찾을 수 없음' };
+  }
+  const MAX_TAGS = 5;
+  const toInsert = tags.slice(0, MAX_TAGS);
+  let added = 0;
+  for (const tag of toInsert) {
+    setNativeValue(input, tag);
+    // Enter 키로 태그 확정
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', keyCode: 13, bubbles: true }));
+    // input 값 초기화 (다음 태그를 위해)
+    setNativeValue(input, '');
+    added++;
+  }
+  return { field: 'tags', ok: true, selector: SELECTORS.tag[0] };
+}
+
+// 상품 상태 버튼 클릭
+// NOTE: 로그인 없이는 DOM에 렌더되지 않아 selector 미검증. 로그인 후 F12로 확인 필요.
+// 현재는 "상품상태" 레이블 옆에서 텍스트 매칭으로 시도.
+function findConditionButton(conditionText: string): HTMLElement | null {
+  const label = [...document.querySelectorAll('div,span')].find(
+    el => el.children.length === 0 && el.textContent?.trim() === '상품상태'
+  );
+  const group = label?.closest('[class*="ProductNewstyle__Group"]');
+  if (!group) return null;
+  const allEls = [...group.querySelectorAll<HTMLElement>('button, [role="button"], div[class*="Button"], span[class*="Button"]')];
+  return allEls.find(el => el.textContent?.trim() === conditionText) ?? null;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -148,6 +187,22 @@ async function injectProduct(product: Product): Promise<InjectResult[]> {
     } else {
       results.push({ field: 'inPerson', ok: false, error: `직거래 radio 못 찾음` });
     }
+  }
+
+  // 태그
+  if (product.tags && product.tags.length > 0) {
+    results.push(await injectTags(product.tags));
+  }
+
+  // 상품 상태 (기본값: 새상품)
+  const condition = product.condition ?? '새상품';
+  const condBtn = findConditionButton(condition);
+  if (condBtn) {
+    condBtn.click();
+    results.push({ field: 'condition', ok: true, selector: `상품상태 그룹 내 "${condition}" 버튼` });
+  } else {
+    // selector 미검증 상태 — 실패로 기록하되 주입은 계속 진행
+    results.push({ field: 'condition', ok: false, error: `"${condition}" 버튼 못 찾음 (로그인 후 selector 검증 필요)` });
   }
 
   // 카테고리

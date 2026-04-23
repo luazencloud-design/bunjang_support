@@ -14,7 +14,7 @@
   ],
   "host_permissions": [
     "https://*.bunjang.co.kr/*",
-    "https://api.anthropic.com/*"
+    "https://generativelanguage.googleapis.com/*"
   ],
   "side_panel": {
     "default_path": "src/sidepanel/index.html"

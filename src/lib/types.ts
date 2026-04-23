@@ -38,8 +38,8 @@ export interface Template {
 // 사용자 설정
 // ────────────────────────────────────────────────────────────────────
 export interface Settings {
-  apiKey?: string;                // Claude API 키 (사용자 본인)
-  model: 'haiku' | 'sonnet';
+  apiKey?: string;                // Gemini API 키 (사용자 본인, Google AI Studio에서 발급)
+  model: 'flash' | 'pro';        // gemini-2.0-flash | gemini-1.5-pro
   fxRate: number;                 // 환율 (기본 9.3)
   shipping: number;               // 배송비 (기본 3500)
   feeRate: number;                // 수수료율 (기본 0.03)
@@ -49,7 +49,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  model: 'haiku',
+  model: 'flash',
   fxRate: 9.3,
   shipping: 3500,
   feeRate: 0.03,

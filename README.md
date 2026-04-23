@@ -77,7 +77,7 @@ pnpm build:mobile    # dist-mobile/ 출력 (Netlify 배포용)
 1. **번개장터 selector 검증** — `src/content/bunjang.ts`의 `SELECTORS`를 실제 페이지에서 확인
 2. **사이드 패널 ↔ content script 메시징** — "자동입력" 버튼 → 번개장터 DOM 주입
 3. **진단 결과 수신** — content script → 사이드패널 진단 섹션 업데이트
-4. **Claude API 실제 호출** — 현재 AI 섹션은 mock 데이터
+4. **Gemini API 실제 호출** — 현재 AI 섹션은 mock 데이터 (Google AI Studio 키 필요)
 5. **chrome.storage.local 영속화** — 입력값/템플릿/설정
 6. **다크모드 + 액센트 토글 UI** — 디자인의 Tweaks 패널을 사이드패널 설정에 통합
 

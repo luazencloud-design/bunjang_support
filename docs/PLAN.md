@@ -178,7 +178,7 @@ bunjang/
     │   └── IOSFrame.jsx            디자인 캔버스용 (PWA 본 빌드에선 미사용)
     │
     ├── lib/                        🔨 (예정) 공용 유틸
-    │   ├── claude.ts               Claude API 클라이언트
+    │   ├── gemini.ts               Gemini API 클라이언트
     │   ├── storage.ts              chrome.storage / localStorage 래퍼
     │   ├── messaging.ts            확장 컨텍스트 간 메시지 타입
     │   └── types.ts                Product, Template, AIResponse 등
@@ -241,9 +241,9 @@ UI 변경이 필요하면 `design_extract/` 원본을 먼저 수정한다는 정
 - [x] 카드 선택 → "선택한 상품명 적용" 버튼
 - [x] AI 생성 설명 미리보기 + 수정 + "설명 적용" 버튼
 - [x] 입력 필드: 브랜드/모델/특징
-- [ ] 실제 Claude API 호출 (현재 mock — 상품명·설명 동시 생성)
-- [ ] 사용자 API 키 입력/저장 UI
-- [ ] 모델 선택 (Haiku 4.5 / Sonnet 4.5)
+- [ ] 실제 Gemini API 호출 (현재 mock — 상품명·설명·태그 동시 생성)
+- [ ] 사용자 API 키 입력/저장 UI (Google AI Studio 키)
+- [ ] 모델 선택 (gemini-2.0-flash / gemini-1.5-pro)
 - [ ] 에러 핸들링 (키 없음, 한도 초과 등)
 
 **설계 원칙**: AI가 상품명 5개 + 설명 초안 동시 생성 → 사용자가 고르고 수정 → 템플릿(배송/정품/반품 등)을 설명 뒤에 추가 → 자동입력
@@ -348,8 +348,8 @@ export interface Template {
 
 // 사용자 설정
 export interface Settings {
-  apiKey?: string;                 // Claude API 키
-  model: 'haiku' | 'sonnet';
+  apiKey?: string;                 // Gemini API 키 (Google AI Studio)
+  model: 'flash' | 'pro';         // gemini-2.0-flash | gemini-1.5-pro
   fxRate: number;                  // 환율 (기본 9.3)
   shipping: number;                // 배송비 (기본 3500)
   feeRate: number;                 // 수수료율 (기본 0.03)
@@ -422,30 +422,32 @@ async function setFiles(input: HTMLInputElement, files: File[]) {
 }
 ```
 
-### 7.4 Claude API 직접 호출 (브라우저)
+### 7.4 Gemini API 직접 호출 (브라우저)
 ```ts
-const res = await fetch('https://api.anthropic.com/v1/messages', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'x-api-key': apiKey,
-    'anthropic-version': '2023-06-01',
-    'anthropic-dangerous-direct-browser-access': 'true',
-  },
-  body: JSON.stringify({
-    model: 'claude-haiku-4-5',  // ⚠️ 실제 모델 ID는 Anthropic API 문서에서 최신 버전 확인 필요
-    max_tokens: 1024,
-    messages: [{ role: 'user', content: prompt }],
-  }),
-});
+// 모델: gemini-2.0-flash (기본, 빠름) | gemini-1.5-pro (품질 우선)
+const model = 'gemini-2.0-flash';
+const res = await fetch(
+  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { responseMimeType: 'application/json' },
+    }),
+  }
+);
+const data = await res.json();
+const result = JSON.parse(data.candidates[0].content.parts[0].text);
 ```
+**장점**: 별도 CORS 우회 헤더 불필요. Google AI Studio에서 무료로 API 키 발급 가능.  
 **보안 주의**: 사용자 본인 API 키만 사용. 강사 키 공유 금지.
 
 ### 7.4.1 AI 생성 프롬프트 방향
 
 **입력**: 브랜드, 모델, 특징, 상품상태, (선택) 이미지 설명
 
-**출력 JSON**:
+**출력 JSON** (`responseMimeType: 'application/json'`으로 강제):
 ```json
 {
   "titles": [
@@ -455,7 +457,8 @@ const res = await fetch('https://api.anthropic.com/v1/messages', {
     { "style": "상태·컨디션",    "title": "..." },
     { "style": "일본어 병기",    "title": "..." }
   ],
-  "description": "..."
+  "description": "...",
+  "tags": ["태그1", "태그2", "태그3"]
 }
 ```
 
@@ -521,13 +524,13 @@ export const storage = {
 **Phase 1 전체 동작 검증 완료** (2026-04-23): SW 콘솔 `{type:'inject:result', results: Array(8)}` 응답 확인
 
 ### ⚠️ Mock / 가짜 동작
-- AI 추천 → 하드코딩 5개 상품명 + aiInputs 기반 템플릿 설명 (Phase 2에서 Claude API 연결)
+- AI 추천 → 하드코딩 5개 상품명 + aiInputs 기반 템플릿 설명 (Phase 2에서 Gemini API 연결)
 - 모바일 바코드 스캔 → setTimeout 시뮬레이션
 - 모바일 사진 → SVG 패턴 placeholder
 - 이미지 자동입력 → "Phase 2 구현 예정" 메시지 반환
 
 ### ❌ 아예 없음
-- Claude API 실제 호출
+- Gemini API 실제 호출
 - 이미지 드래그앤드롭 + IndexedDB 저장
 - 입력값 chrome.storage 영속화 (자동 저장)
 - 실제 카메라 (`getUserMedia`)
@@ -552,7 +555,7 @@ export const storage = {
 ~~7. **진단 섹션 실데이터 표시**~~
 
 ### Phase 2 — 폼 영속화 + AI
-8. **`src/lib/claude.ts`** — API 클라이언트 + 프롬프트 (PROJECT_HANDOFF §6.5)
+8. **`src/lib/gemini.ts`** — Gemini API 클라이언트 + 프롬프트
 9. **AI 섹션 실제 호출 연결** (mock 제거)
 10. **API 키 입력 UI** (설정 패널 신규 구현 필요)
 11. **chrome.storage 자동 저장** (디바운스 500ms)
@@ -586,7 +589,7 @@ export const storage = {
 ### 파일/폴더
 - 디렉토리: kebab-case (`side-panel/`은 안 씀, `sidepanel/`로 통일)
 - React 컴포넌트: PascalCase (`SidePanel.jsx`)
-- 유틸: camelCase (`storage.ts`, `claude.ts`)
+- 유틸: camelCase (`storage.ts`, `gemini.ts`)
 
 ### 코드
 - 디자인 jsx는 **건드리지 않음** (5장 마지막 규칙)
@@ -595,7 +598,7 @@ export const storage = {
 - TypeScript strict, but jsx는 allowJs로 허용 (디자인 그대로 쓰기 위해)
 
 ### 커밋
-- 짧고 명확하게: `feat: AI 섹션 실제 Claude API 연결`
+- 짧고 명확하게: `feat: AI 섹션 실제 Gemini API 연결`
 - prefix: `feat`, `fix`, `refactor`, `style`, `docs`, `chore`
 - 디자인 변경 시 본문에 디자인 원본도 같이 업데이트했는지 명시
 
@@ -607,13 +610,13 @@ export const storage = {
 - **번개장터 SELECTORS** — 2026-04-23 실페이지 검증 완료. 주기적 재검증 필요 (마크업 변경 위험, ISSUES.md #4 참조)
 - **Service Worker 휘발성** — MV3 SW는 5분 idle 후 종료. 상태 유지는 chrome.storage로
 - **이미지는 IndexedDB에 저장** — localStorage는 ~5MB(브라우저 강제), chrome.storage.local도 기본 5MB(`unlimitedStorage` 퍼미션으로 해제 가능). 어느 쪽이든 바이너리 데이터는 IndexedDB가 구조적으로 맞음
-- **`anthropic-dangerous-direct-browser-access` 헤더** — 프로덕션 시 프록시 검토 필요
+- **Gemini API 키** — Google AI Studio(aistudio.google.com)에서 무료 발급. 브라우저 직접 호출 시 별도 CORS 헤더 불필요
 - **메루카리/번개장터 공식 API 없음** — 스크래핑 위주
 
 ### 법적/정책
 - 각 플랫폼 이용약관 준수 (등록 버튼은 사용자가 직접 누르는 원칙 유지)
 - 과도한 대량 등록은 계정 정지 위험 → 대량 자동화 금지
-- 강사가 자기 API 키 공유 금지 (Anthropic 정책 위반)
+- 강사가 자기 API 키 공유 금지 (Google AI 정책 위반)
 
 ### 사용자 경험
 - 사이드패널 폭은 520px (디자인 결정). Chrome 사용자가 폭 조정 가능
@@ -664,7 +667,7 @@ pnpm build:mobile  # PWA → dist-mobile/ (Netlify 등 배포용)
 ### 공식 문서
 - Chrome Side Panel API: https://developer.chrome.com/docs/extensions/reference/api/sidePanel
 - Chrome Extensions MV3: https://developer.chrome.com/docs/extensions/mv3/
-- Claude API: https://docs.claude.com/en/api/overview
+- Gemini API: https://ai.google.dev/gemini-api/docs
 - @crxjs Vite Plugin: https://crxjs.dev/vite-plugin
 - ZXing JS: https://github.com/zxing-js/library
 - Open Food Facts: https://world.openfoodfacts.org/api/v0/
@@ -686,6 +689,6 @@ pnpm build:mobile  # PWA → dist-mobile/ (Netlify 등 배포용)
 1. 시작 전 `PLAN.md`(이 문서) → `PROJECT_HANDOFF.md` → 디자인 jsx 순으로 읽으세요.
 2. **디자인 jsx는 마크업/스타일/로직 건드리지 마세요.** 변경이 꼭 필요하면 `design_extract/` 원본부터 같이 업데이트.
 3. **Phase 1 완료** — SELECTORS 검증, content script, background SW, SidePanel 자동입력 모두 동작 확인됨.
-4. **다음 작업은 Phase 2** — Claude API 실 연결, IndexedDB 이미지 저장, chrome.storage 자동 저장.
+4. **다음 작업은 Phase 2** — Gemini API 실 연결, IndexedDB 이미지 저장, chrome.storage 자동 저장.
 5. Mock 데이터는 점진적으로 실데이터로 교체. 한 번에 다 바꾸지 말고 섹션 단위로.
 6. 사용자가 명시적으로 거부한 것: **당근마켓, Firebase 연동, 완전 자동 업로드**. 이거 다시 제안하지 마세요.

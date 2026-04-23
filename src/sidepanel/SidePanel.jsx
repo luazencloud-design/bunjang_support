@@ -541,7 +541,7 @@ function SidePanel({ tweaks }){
     setTimeout(()=>setToast(null), 1600);
   }
 
-  // 태그 자동생성 — TODO Phase 2: Claude API로 교체
+  // 태그 자동생성 — TODO Phase 2: Gemini API로 교체
   async function handleGenerateTags() {
     if (tagLoading) return;
     setTagLoading(true);
@@ -778,7 +778,7 @@ function SidePanel({ tweaks }){
         </SPSection>
 
         {/* AI titles */}
-        <SPSection title="AI 상품명 추천" meta={<span className="sp-chip accent">{SPI.sparkle()} Haiku 4.5</span>}>
+        <SPSection title="AI 상품명 + 설명 생성" meta={<span className="sp-chip accent">{SPI.sparkle()} Gemini Flash</span>}>
           <div className="sp-row" style={{marginBottom:8, flexWrap:'wrap'}}>
             <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
               <label className="sp-label">브랜드</label>
@@ -799,7 +799,7 @@ function SidePanel({ tweaks }){
           <button className="sp-btn primary block" style={{marginBottom: 10}}
             onClick={()=>{
               setAiLoading(true); setAiSelected(null); setAiDesc(null);
-              // TODO Phase 2: Claude API 실 호출로 교체
+              // TODO Phase 2: Gemini API 실 호출로 교체
               setTimeout(()=>{
                 setAiLoading(false);
                 // mock 설명 생성

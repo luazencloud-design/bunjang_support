@@ -1,0 +1,11 @@
+node_modules
+dist
+dist-mobile
+.DS_Store
+*.local
+.env
+.env.local
+.vite
+*.log
+tsconfig.tsbuildinfo
+.claude

@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "번개장터 등록 도우미",
+  "version": "2.0.0",
+  "description": "번개장터 자동입력 사이드 패널 (Side Panel)",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "clipboardWrite",
+    "downloads",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://*.bunjang.co.kr/*",
+    "https://api.anthropic.com/*"
+  ],
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "background": {
+    "service_worker": "src/background/service-worker.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.bunjang.co.kr/*"],
+      "js": ["src/content/bunjang.ts"]
+    }
+  ],
+  "action": {
+    "default_title": "번개장터 등록 도우미"
+  }
+}

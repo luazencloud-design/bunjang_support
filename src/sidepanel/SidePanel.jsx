@@ -497,7 +497,10 @@ function SidePanel({ tweaks }){
   const [toast, setToast] = useStateSP(null);
   const [aiSelected, setAiSelected] = useStateSP(null);
   const [aiLoading, setAiLoading] = useStateSP(false);
+  const [tagLoading, setTagLoading] = useStateSP(false);
   const [tplActive, setTplActive] = useStateSP(0);
+  // 브랜드/모델/특징 — AI 섹션 + 태그 생성 공용
+  const [aiInputs, setAiInputs] = useStateSP({ brand: '아디다스', model: '삼바 OG', feature: 'S급, 정품' });
 
   // ── Phase 1: 실제 메시지 연결 ──
   const [injecting, setInjecting] = useStateSP(false);
@@ -535,6 +538,26 @@ function SidePanel({ tweaks }){
   function showToast(msg){
     setToast(msg);
     setTimeout(()=>setToast(null), 1600);
+  }
+
+  // 태그 자동생성 — TODO Phase 2: Claude API로 교체
+  async function handleGenerateTags() {
+    if (tagLoading) return;
+    setTagLoading(true);
+    // mock: 브랜드/모델/특징에서 태그 추출
+    await new Promise(r => setTimeout(r, 500));
+    const raw = [
+      aiInputs.brand,
+      aiInputs.model,
+      '일본직구',
+      // feature에서 쉼표 분리 후 첫 단어들
+      ...aiInputs.feature.split(/[,，]/).map(f => f.trim()).filter(Boolean),
+    ].filter(Boolean);
+    // 중복 제거, 공백 없애기, 최대 5개
+    const tags = [...new Set(raw.map(t => t.replace(/\s+/g, '')))].slice(0, 5);
+    setProduct(p => ({...p, tags}));
+    setTagLoading(false);
+    showToast(`태그 ${tags.length}개 생성됨`);
   }
 
   async function handleInject() {
@@ -686,13 +709,19 @@ function SidePanel({ tweaks }){
               태그
               <span style={{marginLeft:'auto', fontSize:10, color:'var(--ink-3)'}}>최대 5개 · 쉼표로 구분</span>
             </label>
-            <input className="sp-input"
-              placeholder="예: 일본직구, 정품, 아디다스"
-              value={(product.tags || []).join(', ')}
-              onChange={e => {
-                const tags = e.target.value.split(',').map(t => t.trim()).filter(Boolean).slice(0, 5);
-                setProduct({...product, tags});
-              }}/>
+            <div style={{display:'flex', gap:6}}>
+              <input className="sp-input"
+                placeholder="예: 일본직구, 정품, 아디다스"
+                value={(product.tags || []).join(', ')}
+                onChange={e => {
+                  const tags = e.target.value.split(',').map(t => t.trim()).filter(Boolean).slice(0, 5);
+                  setProduct({...product, tags});
+                }}/>
+              <button className="sp-btn sm" style={{flexShrink:0, whiteSpace:'nowrap'}}
+                onClick={handleGenerateTags} disabled={tagLoading}>
+                {tagLoading ? SPI.spin() : SPI.sparkle()} 자동
+              </button>
+            </div>
             {(product.tags || []).length > 0 && (
               <div style={{display:'flex', gap:4, flexWrap:'wrap', marginTop:4}}>
                 {(product.tags || []).map((t,i) => (
@@ -744,15 +773,18 @@ function SidePanel({ tweaks }){
           <div className="sp-row" style={{marginBottom:8, flexWrap:'wrap'}}>
             <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
               <label className="sp-label">브랜드</label>
-              <input className="sp-input" defaultValue="아디다스"/>
+              <input className="sp-input" value={aiInputs.brand}
+                onChange={e => setAiInputs(v => ({...v, brand: e.target.value}))}/>
             </div>
             <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
               <label className="sp-label">모델</label>
-              <input className="sp-input" defaultValue="삼바 OG"/>
+              <input className="sp-input" value={aiInputs.model}
+                onChange={e => setAiInputs(v => ({...v, model: e.target.value}))}/>
             </div>
             <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
               <label className="sp-label">특징</label>
-              <input className="sp-input" defaultValue="S급, 정품"/>
+              <input className="sp-input" value={aiInputs.feature}
+                onChange={e => setAiInputs(v => ({...v, feature: e.target.value}))}/>
             </div>
           </div>
           <button className="sp-btn primary block" style={{marginBottom: 10}}

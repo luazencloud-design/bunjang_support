@@ -133,9 +133,11 @@ src/mobile/  (독립 빌드, Netlify 배포 대상)
 
 ```
 bunjang/
-├── PROJECT_HANDOFF.md       원본 인수인계 (역사적 컨텍스트)
-├── PLAN.md                  ← 이 문서 (현재 진실)
 ├── README.md                설치/개발 가이드
+├── docs/
+│   ├── PLAN.md              ← 이 문서 (현재 진실)
+│   ├── PROJECT_HANDOFF.md   원본 인수인계 (역사적 컨텍스트)
+│   └── ISSUES.md            이슈 트래킹
 │
 ├── package.json             pnpm, scripts
 ├── pnpm-lock.yaml

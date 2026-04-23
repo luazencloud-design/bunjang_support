@@ -50,11 +50,43 @@ GitHub Issues 원본: https://github.com/luazencloud-design/bunjang_support/issu
 
 ## 닫힌 이슈
 
-### #1 번개장터 자동입력 실사용 테스트 필요
-**상태**: PR #5에서 구현 완료, 실사용 테스트 대기 중
+### #5 [크리티컬] 자동입력 전혀 작동 안 함 — tabs 퍼미션 누락 + currentWindow 버그
+**상태**: ✅ 해결 (2026-04-23) · **커밋**: `bde55ef`, `fde0fa0`
 
-자동입력 버튼 → background → content script → DOM 주입 흐름 구현됨.  
-실제 번개장터 페이지에서 사용자 테스트 후 최종 확인 필요.
+**원인 1 — `manifest.json` `tabs` 퍼미션 누락**
+- Background SW에서 `chrome.tabs.query()` 결과의 `tab.url`이 항상 `undefined`
+- `"tabs"` 퍼미션 없이는 URL 읽기 불가 (activeTab 단독으로는 부족)
+- 결과: "번개장터 페이지가 아님" 에러로 content script 전달 자체 차단
+
+**원인 2 — `currentWindow: true`**
+- Service Worker에는 "현재 창" 개념이 없어 항상 빈 배열 반환
+- `lastFocusedWindow: true`로 수정
+
+**검증**: SW 콘솔 로그로 `{type: 'inject:result', results: Array(8)}` 응답 확인
+
+---
+
+### #6 [크리티컬] 상품 상태 셀렉터 구조 오판 — radio button이 아닌 button으로 잘못 구현
+**상태**: ✅ 해결 (2026-04-23) · **커밋**: `9032e37`
+
+**원인**
+- 로그인 없이 페이지 열면 상품상태 섹션 자체가 렌더링 안 됨 → button UI로 잘못 가정
+- 실제 DOM은 `label > input[type="radio"]` 구조
+- `label.textContent` = "새 상품 (미사용)사용하지 않은 새 상품" (label 텍스트 + 설명 span 합산)
+  → `===` 비교 실패, `startsWith()` 필요
+
+**수정**
+- `findConditionButton()` → `findConditionRadio()` 로 교체
+- `label.textContent.trim().startsWith(conditionText)` 로 매칭
+- `types.ts` condition 값 정확한 번개장터 label 텍스트로 확정
+
+---
+
+### #1 번개장터 자동입력 실사용 테스트
+**상태**: ✅ 해결 (2026-04-23)
+
+SW 콘솔에서 `results: Array(8)` 응답 확인 — 전체 주입 파이프라인 정상 작동 검증 완료.  
+(#5, #6 버그 수정으로 실 동작 달성)
 
 ---
 
@@ -63,6 +95,7 @@ GitHub Issues 원본: https://github.com/luazencloud-design/bunjang_support/issu
 | 항목 | Phase | 메모 |
 |---|---|---|
 | chrome.storage 자동 저장 (디바운스) | 2 | `src/lib/storage.ts` draft.set() 활용 |
+| 태그 자동생성 Claude API 실 연결 | 2 | 현재 mock (aiInputs 파싱) → Phase 2에서 실 API 연결 |
 | 상태 스트립 실시간 탭 감지 | 3 | background → tab:url 메시지 이미 구현됨 |
 | 단축키 `Alt+1~9` 템플릿 삽입 | 3 | KeyboardEvent 리스너 |
 | 최근 등록 이력 | 3 | `src/lib/storage.ts` history.add() 활용 |

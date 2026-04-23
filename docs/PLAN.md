@@ -211,14 +211,14 @@ UI 변경이 필요하면 `design_extract/` 원본을 먼저 수정한다는 정
 
 #### B. 상태 스트립
 - [x] 라이브 펄스 닷
-- [ ] 현재 활성 탭의 URL 실시간 표시 (`chrome.tabs` API)
-- [ ] 번개장터 페이지일 때만 "● 연결됨" 초록색
+- [x] 현재 활성 탭의 URL 실시간 표시 (`chrome.tabs` API)
+- [x] 번개장터 페이지일 때만 "● 연결됨" 초록색
 
 #### C. 액션 바 (상단 고정)
 - [x] "번개장터 자동입력" 버튼 (검정 + shimmer 호버)
-- [ ] 클릭 → background → content script → DOM 주입
-- [ ] 진행 중 로딩 상태
-- [ ] 결과 토스트
+- [x] 클릭 → background → content script → DOM 주입
+- [x] 진행 중 로딩 상태 (injecting 상태)
+- [ ] 결과 토스트 (진단 섹션에서 확인 가능, 별도 토스트는 Phase 3)
 
 #### D. 상품 섹션
 - [x] 이미지 슬롯 3개 (드롭/클릭 영역)
@@ -252,9 +252,9 @@ UI 변경이 필요하면 `design_extract/` 원본을 먼저 수정한다는 정
 - [ ] chrome.storage.local 영속화
 
 #### H. 자동입력 진단 섹션
-- [x] 6개 필드별 ✓/✗ 표시 (현재 mock)
+- [x] 필드별 ✓/✗ 표시
 - [x] 사용된 셀렉터 표시
-- [ ] 실제 content script 결과 수신
+- [x] 실제 content script 결과 수신 (Phase 1 완료)
 - [ ] 실패 필드 클릭 → 페이지 해당 위치로 스크롤
 
 #### I. 최근 등록 섹션
@@ -264,20 +264,21 @@ UI 변경이 필요하면 `design_extract/` 원본을 먼저 수정한다는 정
 ### 5.2 Content Script 기능 (`bunjang.ts`)
 
 - [x] `setNativeValue()` 헬퍼 (React 호환 값 설정)
-- [x] `SELECTORS` 다중 셀렉터 테이블 (현재 추정값)
-- [ ] **번개장터 실제 페이지에서 셀렉터 검증** (최우선)
-- [ ] 메시지 리스너 (`chrome.runtime.onMessage`)
-- [ ] 필드별 주입 함수 (title, price, description, images, category, shipping)
-- [ ] 이미지 `DataTransfer` 주입
-- [ ] 카테고리/배송 등 select 필드 처리
-- [ ] 결과 객체 반환: `{ field, ok, selector, error? }[]`
+- [x] `SELECTORS` 다중 셀렉터 테이블 (2026-04-23 실페이지 검증 완료)
+- [x] 메시지 리스너 (`chrome.runtime.onMessage`)
+- [x] 필드별 주입 함수 (title, price, description, quantity, tags, condition, shipping, inPerson)
+- [x] 이미지 `DataTransfer` 주입 골격 (실 파일 연동은 Phase 2 IndexedDB 완료 후)
+- [x] 태그 주입 (`setNativeValue` + `KeyboardEvent Enter`)
+- [x] 상품 상태 radio 주입 (`label.textContent.startsWith()` 방식)
+- [x] 결과 객체 반환: `{ field, ok, selector, error? }[]`
+- [ ] 카테고리 버튼 (현재 골격만, 2단계 선택 구현 필요)
 
 ### 5.3 Background Service Worker
 
 - [x] `setPanelBehavior({ openPanelOnActionClick: true })`
-- [ ] `chrome.runtime.onMessage` 라우팅
-- [ ] sidepanel ↔ content script 메시지 중계
-- [ ] 활성 탭 URL 변경 감지 → sidepanel에 알림
+- [x] `chrome.runtime.onMessage` 라우팅 (inject 메시지 중계)
+- [x] sidepanel ↔ content script 메시지 중계 (`lastFocusedWindow` 방식)
+- [x] 활성 탭 URL 변경 감지 → sidepanel에 알림 (`onUpdated` + `onActivated`)
 
 ### 5.4 Mobile PWA 기능
 
@@ -444,9 +445,10 @@ const res = await fetch('https://api.anthropic.com/v1/messages', {
 chrome.runtime.sendMessage({ type: 'inject', product });
 
 // background/service-worker.ts — .ts 파일이라 타입 사용 가능
-chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => {
+// ⚠️ currentWindow: true 쓰지 말 것 — Service Worker엔 "현재 창" 개념 없음 → 항상 빈 배열
+chrome.runtime.onMessage.addListener((msg: ExtMessage, _sender, sendResponse) => {
   if (msg.type === 'inject') {
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, ([tab]) => {
       chrome.tabs.sendMessage(tab.id!, msg, sendResponse);
       // sendResponse는 content script의 응답을 그대로 SidePanel로 전달하는 콜백 체인
     });
@@ -470,7 +472,7 @@ export const storage = {
 
 ## 8. 현재 구현 상태 (정직)
 
-### ✅ 완료
+### ✅ 완료 (Phase 1 포함)
 - Vite + React + TS + @crxjs 골격 빌드 통과
 - 사이드패널 UI 디자인 그대로 렌더 (검정 로고/컬러로 커스터마이즈됨)
 - 모바일 PWA UI 디자인 그대로 렌더
@@ -481,9 +483,11 @@ export const storage = {
 - **`src/lib/types.ts`** — Product / Template / Settings / ExtMessage / InjectResult 타입
 - **`src/lib/storage.ts`** — chrome.storage.local 래퍼 (draft / templates / settings / history)
 - **`src/lib/messaging.ts`** — 타입 안전 메시지 헬퍼
-- **`src/content/bunjang.ts`** — SELECTORS 실 검증 완료 (2026-04-23), 메시지 리스너, 필드 주입 함수
-- **`src/background/service-worker.ts`** — inject 메시지 라우팅, 탭 URL 변경 감지
-- **`src/sidepanel/SidePanel.jsx`** — 자동입력 버튼 실 연결, 진단 섹션 실데이터, 상태 스트립 실 URL
+- **`src/content/bunjang.ts`** — SELECTORS 실 검증 완료 (2026-04-23), 메시지 리스너, 필드 주입 함수, 태그/상품상태 주입
+- **`src/background/service-worker.ts`** — inject 메시지 라우팅 (`lastFocusedWindow`), 탭 URL 변경 감지
+- **`src/sidepanel/SidePanel.jsx`** — 자동입력 버튼 실 연결, 진단 섹션 실데이터, 상태 스트립 실 URL, 태그 입력 + 자동생성, 상품상태 5종 버튼
+
+**Phase 1 전체 동작 검증 완료** (2026-04-23): SW 콘솔 `{type:'inject:result', results: Array(8)}` 응답 확인
 
 ### ⚠️ Mock / 가짜 동작
 - AI 추천 → 하드코딩 5개 응답 (Phase 2에서 Claude API 연결)
@@ -507,18 +511,14 @@ export const storage = {
 
 ## 9. 작업 우선순위 (다음 에이전트가 따라갈 순서)
 
-### Phase 1 — 핵심 통신 (확장 실사용 가능 만들기)
-1. **`src/lib/types.ts`** 생성 — 위 6장 데이터 모델 그대로
-2. **`src/lib/messaging.ts`** — 타입 안전 메시지 헬퍼
-3. **`src/lib/storage.ts`** — chrome.storage 래퍼
-4. **Content script 실제 구현**
-   - 메시지 리스너
-   - 번개장터 페이지에서 SELECTORS 검증 (개발자 도구 F12)
-   - 필드별 주입 함수
-   - 결과 반환
-5. **Background SW 메시지 라우팅**
-6. **SidePanel "자동입력" 버튼 실제 연결**
-7. **진단 섹션 실데이터 표시**
+### ~~Phase 1 — 핵심 통신~~ ✅ 완료 (2026-04-23)
+~~1. **`src/lib/types.ts`** 생성~~
+~~2. **`src/lib/messaging.ts`** — 타입 안전 메시지 헬퍼~~
+~~3. **`src/lib/storage.ts`** — chrome.storage 래퍼~~
+~~4. **Content script 실제 구현** (SELECTORS 검증 포함)~~
+~~5. **Background SW 메시지 라우팅**~~
+~~6. **SidePanel "자동입력" 버튼 실제 연결**~~
+~~7. **진단 섹션 실데이터 표시**~~
 
 ### Phase 2 — 폼 영속화 + AI
 8. **`src/lib/claude.ts`** — API 클라이언트 + 프롬프트 (PROJECT_HANDOFF §6.5)
@@ -573,7 +573,7 @@ export const storage = {
 ## 11. 알려진 제약 / 주의사항
 
 ### 기술적
-- **번개장터 SELECTORS는 추정값** — 실제 페이지 검증 필수 (Phase 1 작업 4)
+- **번개장터 SELECTORS** — 2026-04-23 실페이지 검증 완료. 주기적 재검증 필요 (마크업 변경 위험, ISSUES.md #4 참조)
 - **Service Worker 휘발성** — MV3 SW는 5분 idle 후 종료. 상태 유지는 chrome.storage로
 - **이미지는 IndexedDB에 저장** — localStorage는 ~5MB(브라우저 강제), chrome.storage.local도 기본 5MB(`unlimitedStorage` 퍼미션으로 해제 가능). 어느 쪽이든 바이너리 데이터는 IndexedDB가 구조적으로 맞음
 - **`anthropic-dangerous-direct-browser-access` 헤더** — 프로덕션 시 프록시 검토 필요
@@ -654,6 +654,7 @@ pnpm build:mobile  # PWA → dist-mobile/ (Netlify 등 배포용)
 
 1. 시작 전 `PLAN.md`(이 문서) → `PROJECT_HANDOFF.md` → 디자인 jsx 순으로 읽으세요.
 2. **디자인 jsx는 마크업/스타일/로직 건드리지 마세요.** 변경이 꼭 필요하면 `design_extract/` 원본부터 같이 업데이트.
-3. **번개장터 SELECTORS 검증이 1순위입니다** — 이게 안 되면 모든 자동입력이 동작 안 함.
-4. Mock 데이터는 점진적으로 실데이터로 교체. 한 번에 다 바꾸지 말고 섹션 단위로.
-5. 사용자가 명시적으로 거부한 것: **당근마켓, Firebase 연동, 완전 자동 업로드**. 이거 다시 제안하지 마세요.
+3. **Phase 1 완료** — SELECTORS 검증, content script, background SW, SidePanel 자동입력 모두 동작 확인됨.
+4. **다음 작업은 Phase 2** — Claude API 실 연결, IndexedDB 이미지 저장, chrome.storage 자동 저장.
+5. Mock 데이터는 점진적으로 실데이터로 교체. 한 번에 다 바꾸지 말고 섹션 단위로.
+6. 사용자가 명시적으로 거부한 것: **당근마켓, Firebase 연동, 완전 자동 업로드**. 이거 다시 제안하지 마세요.

@@ -35,16 +35,17 @@ GitHub Issues 원본: https://github.com/luazencloud-design/bunjang_support/issu
 
 ---
 
-### #3 [Phase 2] Claude API 실제 연결 + API 키 UI
+### #3 [Phase 2] Gemini API 실제 연결 + API 키 UI
 **우선순위**: 보통 · **대상 브랜치**: feat/phase2-form-ai
 
-- `src/lib/claude.ts` 생성 — API 클라이언트
-- 브라우저 직접 호출 (`anthropic-dangerous-direct-browser-access`)
-- 설정 패널 API 키 입력 + chrome.storage 저장
-- AI 섹션 "재생성" 버튼 실 연결 (현재 mock)
-- 모델: Haiku / Sonnet 선택
+- `src/lib/gemini.ts` 생성 — Gemini API 클라이언트
+- 브라우저 직접 호출 (별도 CORS 헤더 불필요)
+- 설정 패널 API 키 입력 + chrome.storage 저장 (Google AI Studio 키)
+- AI 섹션 "상품명 + 설명 생성" 버튼 실 연결 (현재 mock)
+- 모델: gemini-2.0-flash (기본) / gemini-1.5-pro (품질 우선)
+- 응답: `{ titles: [...], description: "...", tags: [...] }` JSON
 
-참고: `PROJECT_HANDOFF.md §6.5` 프롬프트 방향
+참고: `PLAN.md §7.4` Gemini API 호출 패턴 + 프롬프트 방향
 
 ---
 
@@ -95,7 +96,7 @@ SW 콘솔에서 `results: Array(8)` 응답 확인 — 전체 주입 파이프라
 | 항목 | Phase | 메모 |
 |---|---|---|
 | chrome.storage 자동 저장 (디바운스) | 2 | `src/lib/storage.ts` draft.set() 활용 |
-| 태그 자동생성 Claude API 실 연결 | 2 | 현재 mock (aiInputs 파싱) → Phase 2에서 실 API 연결 |
+| 태그 자동생성 Gemini API 실 연결 | 2 | 현재 mock (aiInputs 파싱) → Phase 2 Gemini 호출로 교체 |
 | 상태 스트립 실시간 탭 감지 | 3 | background → tab:url 메시지 이미 구현됨 |
 | 단축키 `Alt+1~9` 템플릿 삽입 | 3 | KeyboardEvent 리스너 |
 | 최근 등록 이력 | 3 | `src/lib/storage.ts` history.add() 활용 |

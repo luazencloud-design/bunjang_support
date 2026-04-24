@@ -12,6 +12,10 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     hmr: { port: 5173 },
+    cors: true,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+    },
   },
   build: {
     rollupOptions: {

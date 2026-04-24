@@ -513,8 +513,9 @@ function SidePanel({ tweaks }){
     cost: 0,
     price: 0,
     desc: '',
-    imgs: [],   // IndexedDB 키 배열 (예: ['img:1714...-abc'])
+    imgs: [],            // IndexedDB 키 배열 (예: ['img:1714...-abc'])
     tags: [],
+    categoryPath: [],    // [대분류, 중분류, 소분류]
   });
   // Settings (chrome.storage.local 영구 저장)
   const [appSettings, setAppSettings] = useStateSP(DEFAULT_AI_SETTINGS);
@@ -726,11 +727,19 @@ function SidePanel({ tweaks }){
       }));
       setAiTitles(mapped);
       setAiDesc(out.description);
-      // tags가 비어있던 경우만 자동 채움
-      if ((!product.tags || product.tags.length === 0) && Array.isArray(out.tags)) {
-        setProduct(p => ({...p, tags: out.tags}));
-      }
-      showToast('AI 생성 완료');
+      setAiSelected(0);
+
+      // 모든 항목 자동 채움 — 첫 번째 상품명, 설명, 태그, 카테고리
+      setProduct(p => ({
+        ...p,
+        title: out.titles[0]?.title || p.title,
+        desc:  out.description       || p.desc,
+        tags:  Array.isArray(out.tags) && out.tags.length > 0 ? out.tags : p.tags,
+        categoryPath: Array.isArray(out.categoryPath) && out.categoryPath.length > 0
+          ? out.categoryPath
+          : p.categoryPath,
+      }));
+      showToast('AI로 모든 항목이 채워졌어요');
     } catch (e) {
       const msg = e?.message || String(e);
       if (msg === 'GEMINI_NO_KEY') {
@@ -872,6 +881,59 @@ function SidePanel({ tweaks }){
       </div>
 
       <div className="sp-body">
+        {/* AI 상품정보 생성 — 한 번 누르면 모든 항목 채움 */}
+        <SPSection title="AI 상품정보 생성" meta={
+          <span className="sp-chip accent">
+            {SPI.sparkle()} Gemini {appSettings.model === 'pro' ? 'Pro' : 'Flash'}
+          </span>
+        }>
+          <div className="sp-row" style={{marginBottom:8, flexWrap:'wrap'}}>
+            <div className="sp-field" style={{marginBottom:0, minWidth: 100}}>
+              <label className="sp-label">브랜드 <span className="req">*</span></label>
+              <input className="sp-input" value={aiInputs.brand} placeholder="예: 아디다스"
+                onChange={e => setAiInputs(v => ({...v, brand: e.target.value}))}/>
+            </div>
+            <div className="sp-field" style={{marginBottom:0, minWidth: 100}}>
+              <label className="sp-label">모델 <span className="req">*</span></label>
+              <input className="sp-input" value={aiInputs.model} placeholder="예: 삼바 OG"
+                onChange={e => setAiInputs(v => ({...v, model: e.target.value}))}/>
+            </div>
+            <div className="sp-field" style={{marginBottom:0, minWidth: 100}}>
+              <label className="sp-label">특징</label>
+              <input className="sp-input" value={aiInputs.feature} placeholder="예: S급, 정품"
+                onChange={e => setAiInputs(v => ({...v, feature: e.target.value}))}/>
+            </div>
+          </div>
+          <button className="sp-btn primary block" style={{marginBottom: 10}}
+            onClick={handleGenerateAI} disabled={aiLoading}>
+            {aiLoading
+              ? <>{SPI.spin()} 생성 중…</>
+              : <>{SPI.sparkle()} AI로 모든 항목 채우기</>}
+          </button>
+          {/* 생성 후: 다른 스타일 상품명 카드 — 클릭 시 즉시 교체 */}
+          {aiTitles[0]?.key.startsWith('ai-') && (
+            <>
+              <div className="sp-hint" style={{marginBottom:6}}>
+                상품명 다른 스타일로 바꾸려면 카드 클릭
+              </div>
+              <div className="sp-ai-grid">
+                {aiTitles.map((r,i)=>(
+                  <div key={r.key} className={`sp-ai ${aiSelected===i?'selected':''}`}
+                    onClick={()=>{
+                      setAiSelected(i);
+                      setProduct(p => ({...p, title: r.text}));
+                      showToast('상품명 교체됨');
+                    }}>
+                    <div className="sp-ai-style"><span className="dot"/>{r.label}</div>
+                    <div className="sp-ai-title">{r.text}</div>
+                    <div className="sp-ai-len">{r.text.length}자</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </SPSection>
+
         {/* Images + Info — combined, side-panel has room */}
         <SPSection title="상품" meta="이미지 3/3 · 마진 흑자">
           <div style={{marginBottom: 10}}>
@@ -992,6 +1054,31 @@ function SidePanel({ tweaks }){
             )}
           </div>
 
+          {/* 카테고리 — 대/중/소 3단계 (자동입력 시 순차 클릭) */}
+          <div className="sp-field">
+            <label className="sp-label">
+              카테고리
+              <span style={{marginLeft:'auto', fontSize:10, color:'var(--ink-3)'}}>
+                대분류 / 중분류 / 소분류
+              </span>
+            </label>
+            <div className="sp-row">
+              {[0,1,2].map(i => (
+                <input key={i} className="sp-input"
+                  placeholder={['대분류','중분류','소분류'][i]}
+                  value={product.categoryPath?.[i] || ''}
+                  onChange={e => {
+                    const next = [...(product.categoryPath || ['','',''])];
+                    while (next.length < 3) next.push('');
+                    next[i] = e.target.value;
+                    // 빈 값 뒤쪽은 잘라냄
+                    while (next.length > 0 && !next[next.length-1]) next.pop();
+                    setProduct({...product, categoryPath: next});
+                  }}/>
+              ))}
+            </div>
+          </div>
+
           {/* 상품 상태 — 번개장터 실제 값과 동일 */}
           <div className="sp-field">
             <label className="sp-label">상품 상태</label>
@@ -1035,65 +1122,6 @@ function SidePanel({ tweaks }){
               </span>
             </div>
           </div>
-        </SPSection>
-
-        {/* AI titles */}
-        <SPSection title="AI 상품명 + 설명 생성" meta={<span className="sp-chip accent">{SPI.sparkle()} Gemini Flash</span>}>
-          <div className="sp-row" style={{marginBottom:8, flexWrap:'wrap'}}>
-            <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
-              <label className="sp-label">브랜드</label>
-              <input className="sp-input" value={aiInputs.brand}
-                onChange={e => setAiInputs(v => ({...v, brand: e.target.value}))}/>
-            </div>
-            <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
-              <label className="sp-label">모델</label>
-              <input className="sp-input" value={aiInputs.model}
-                onChange={e => setAiInputs(v => ({...v, model: e.target.value}))}/>
-            </div>
-            <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
-              <label className="sp-label">특징</label>
-              <input className="sp-input" value={aiInputs.feature}
-                onChange={e => setAiInputs(v => ({...v, feature: e.target.value}))}/>
-            </div>
-          </div>
-          <button className="sp-btn primary block" style={{marginBottom: 10}}
-            onClick={handleGenerateAI} disabled={aiLoading}>
-            {aiLoading ? <>{SPI.spin()} 생성 중…</> : <>{SPI.sparkle()} 상품명 + 설명 생성</>}
-          </button>
-          <div className="sp-ai-grid">
-            {aiTitles.map((r,i)=>(
-              <div key={r.key} className={`sp-ai ${aiSelected===i?'selected':''}`} onClick={()=>setAiSelected(i)}>
-                <div className="sp-ai-style"><span className="dot"/>{r.label}</div>
-                <div className="sp-ai-title">{r.text}</div>
-                <div className="sp-ai-len">{r.text.length}자</div>
-              </div>
-            ))}
-          </div>
-          {aiSelected != null && (
-            <button className="sp-btn primary block" style={{marginTop:10}}
-              onClick={()=>{ setProduct({...product, title: aiTitles[aiSelected].text}); showToast('상품명 적용됨'); }}>
-              {SPI.check()} 선택한 상품명 적용
-            </button>
-          )}
-
-          {/* AI 생성 설명 미리보기 + 적용 */}
-          {aiDesc != null && (
-            <div style={{marginTop:12}}>
-              <div className="sp-label" style={{marginBottom:5}}>
-                AI 생성 설명
-                <span style={{marginLeft:'auto', fontSize:10, color:'var(--ink-3)'}}>
-                  템플릿은 설명 섹션에서 추가
-                </span>
-              </div>
-              <textarea className="sp-textarea" style={{minHeight:90, fontSize:12}}
-                value={aiDesc}
-                onChange={e => setAiDesc(e.target.value)}/>
-              <button className="sp-btn primary block" style={{marginTop:6}}
-                onClick={()=>{ setProduct({...product, desc: aiDesc}); showToast('설명 적용됨'); }}>
-                {SPI.check()} 설명 적용
-              </button>
-            </div>
-          )}
         </SPSection>
 
         {/* Templates */}

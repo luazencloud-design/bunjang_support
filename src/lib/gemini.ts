@@ -23,6 +23,7 @@ export interface GeminiOutput {
   titles: GeminiTitle[]; // 5개
   description: string;   // 2~4문장
   tags: string[];        // 최대 5개
+  categoryPath: string[]; // [대분류, 중분류, 소분류] — 예: ['가방/지갑', '백팩', '캐주얼백팩']
 }
 
 export type GeminiModel = 'flash' | 'pro';
@@ -77,6 +78,12 @@ ${priceLine}
 - 번개장터 검색에 도움되는 핵심 키워드만 선택
 - 최대 5개, 브랜드·모델·용도·특징 위주
 
+[카테고리 작성 지침]
+- 번개장터 카테고리 트리에 맞는 대분류/중분류/소분류 3단계 경로 제시
+- 대분류 예시: 여성의류, 남성의류, 신발, 가방/지갑, 시계, 쥬얼리, 패션 액세서리, 디지털, 가전, 스포츠, 출산/유아동, 뷰티, 도서/티켓, 가구/인테리어, 식품, 반려동물 등
+- 정확한 번개장터 분류명을 사용하되, 모르는 경우 가장 가까운 일반 분류명 사용
+- 정확히 3개 항목 ([대, 중, 소])
+
 [출력 JSON 스키마]
 반드시 아래 스키마를 정확히 따르는 JSON만 반환하세요. 다른 텍스트는 포함하지 마세요.
 {
@@ -88,7 +95,8 @@ ${priceLine}
     { "style": "일본어 병기",    "title": "..." }
   ],
   "description": "...",
-  "tags": ["태그1", "태그2", "태그3", "태그4", "태그5"]
+  "tags": ["태그1", "태그2", "태그3", "태그4", "태그5"],
+  "categoryPath": ["대분류", "중분류", "소분류"]
 }`;
 }
 
@@ -216,6 +224,17 @@ export async function generateProductInfo(
 
   // tags 최대 5개로 잘라냄 (API가 초과 반환할 경우 대비)
   output.tags = output.tags.slice(0, 5);
+
+  // categoryPath 검증 — 유효하지 않으면 빈 배열로 설정 (부분 출력 허용)
+  if (
+    !Array.isArray(output.categoryPath) ||
+    output.categoryPath.length !== 3 ||
+    !output.categoryPath.every((item) => typeof item === 'string')
+  ) {
+    output.categoryPath = [];
+  } else {
+    output.categoryPath = output.categoryPath.slice(0, 3);
+  }
 
   return output;
 }

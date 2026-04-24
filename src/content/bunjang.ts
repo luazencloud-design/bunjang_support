@@ -73,10 +73,110 @@ function findShippingRadio(type: ShippingType): HTMLInputElement | null {
   return (label?.querySelector('input[type="radio"]') as HTMLInputElement) ?? null;
 }
 
-// 카테고리 버튼
+// 카테고리 버튼 (mobile legacy)
 function findCategoryButton(name: string): HTMLButtonElement | null {
   const btns = [...document.querySelectorAll<HTMLButtonElement>('button[class*="CategoryBoxstyle__CategoryButton"]')];
   return btns.find(b => b.textContent?.trim() === name) ?? null;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 3단계 카테고리 아이템 탐색
+// columnIndex: 0=대분류, 1=중분류, 2=소분류
+// ────────────────────────────────────────────────────────────────────
+function findCategoryItem(name: string, columnIndex: number): Element | null {
+  // Strategy C: mobile — columnIndex 0 전용
+  if (columnIndex === 0) {
+    const mobileBtn = findCategoryButton(name);
+    if (mobileBtn) return mobileBtn;
+  }
+
+  // Strategy A: PC — "카테고리" 섹션 내 columnIndex 번째 열
+  const allTextNodes = [...document.querySelectorAll<HTMLElement>('div, span, label')];
+  const categoryLabel = allTextNodes.find(
+    el => el.children.length === 0 && el.textContent?.trim() === '카테고리'
+  );
+  if (categoryLabel) {
+    // 가장 가까운 그룹 컨테이너 탐색
+    let container: Element | null = categoryLabel.parentElement;
+    for (let i = 0; i < 5 && container; i++) {
+      // 3개 이상의 자식 열을 갖는 컨테이너 찾기
+      const columns = [...container.children].filter(
+        c => c.tagName !== 'LABEL' && c.querySelectorAll('li, button, [role="option"]').length > 0
+      );
+      if (columns.length >= 2) {
+        const col = columns[columnIndex];
+        if (col) {
+          const items = [...col.querySelectorAll<HTMLElement>('li, button, [role="option"]')];
+          const found = items.find(el => el.textContent?.trim() === name);
+          if (found) return found;
+        }
+        break;
+      }
+      container = container.parentElement;
+    }
+
+    // 열 구조를 못 찾은 경우: 섹션 내 전체 검색 후 columnIndex로 필터
+    const section = categoryLabel.closest('section, [class*="Group"], [class*="Section"], [class*="Category"]') ?? categoryLabel.parentElement;
+    if (section) {
+      const candidates = [...section.querySelectorAll<HTMLElement>('li, button, [role="option"], [class*="ategory"] li')];
+      const exact = candidates.filter(
+        el =>
+          el.textContent?.trim() === name &&
+          (el as HTMLElement).offsetParent !== null &&
+          el.querySelector('span, div') === null // leaf 우선
+      );
+      if (exact.length > 0) return exact[0];
+      // leaf 조건 없이 재시도
+      const fallback = candidates.filter(
+        el => el.textContent?.trim() === name && (el as HTMLElement).offsetParent !== null
+      );
+      if (fallback.length > 0) return fallback[0];
+    }
+  }
+
+  // Strategy B: 전역 폴백 — 텍스트 정확 일치 + 가시 + leaf 우선
+  const allItems = [...document.querySelectorAll<HTMLElement>(
+    'li, button, [role="option"], [class*="ategory"] *'
+  )];
+  const visibleExact = allItems.filter(
+    el =>
+      el.textContent?.trim() === name &&
+      (el as HTMLElement).offsetParent !== null
+  );
+  // leaf(자식에 텍스트 없음) 우선
+  const leaf = visibleExact.find(
+    el => !([...el.children] as HTMLElement[]).some(c => c.textContent?.trim())
+  );
+  return leaf ?? visibleExact[0] ?? null;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 3단계 카테고리 순차 클릭
+// path: ['대분류', '중분류', '소분류'] (1~3개)
+// ────────────────────────────────────────────────────────────────────
+async function injectCategoryPath(path: string[]): Promise<InjectResult> {
+  const pathStr = path.join(' > ');
+  for (let i = 0; i < Math.min(path.length, 3); i++) {
+    const name = path[i];
+    const el = findCategoryItem(name, i);
+    if (!el) {
+      return {
+        field: 'category',
+        ok: false,
+        error: `${pathStr} 중 "${name}" (level ${i + 1}) 못 찾음`,
+      };
+    }
+    (el as HTMLElement).click();
+    if (i < path.length - 1) {
+      // 다음 열이 렌더링될 때까지 대기
+      await new Promise<void>(r => setTimeout(r, 250));
+    }
+  }
+  return {
+    field: 'category',
+    ok: true,
+    selector: 'categoryPath: ' + pathStr,
+  };
 }
 
 // 태그 입력 — setNativeValue 후 Enter 키 이벤트로 태그 추가
@@ -206,15 +306,12 @@ async function injectProduct(product: Product): Promise<InjectResult[]> {
     results.push({ field: 'condition', ok: false, error: `상품상태 radio 못 찾음: "${condition}"` });
   }
 
-  // 카테고리
-  if (product.category) {
-    const btn = findCategoryButton(product.category);
-    if (btn) {
-      btn.click();
-      results.push({ field: 'category', ok: true, selector: `button[text="${product.category}"]` });
-    } else {
-      results.push({ field: 'category', ok: false, error: `카테고리 버튼 없음: ${product.category}` });
-    }
+  // 카테고리 — categoryPath 우선, 없으면 legacy single category
+  const path = (product.categoryPath && product.categoryPath.length > 0)
+    ? product.categoryPath
+    : (product.category ? [product.category] : []);
+  if (path.length > 0) {
+    results.push(await injectCategoryPath(path));
   }
 
   // 이미지 — IndexedDB 키로 File 복원 후 주입

@@ -12,7 +12,8 @@ export interface Product {
   imgs: string[];                 // IndexedDB 키 목록 (base64 직접 저장 금지)
   brand?: string;
   model?: string;
-  category?: string;
+  category?: string;              // (legacy — 단일 대분류 지원)
+  categoryPath?: string[];        // 대/중/소분류 (예: ['가방/지갑','백팩','캐주얼백팩'])
   feature?: string;
   quantity?: number;
   tags?: string[];                 // 태그 (최대 5개)

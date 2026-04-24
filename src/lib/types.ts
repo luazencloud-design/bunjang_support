@@ -14,6 +14,8 @@ export interface Product {
   model?: string;
   category?: string;              // (legacy — 단일 대분류 지원)
   categoryPath?: string[];        // 대/중/소분류 (예: ['가방/지갑','백팩','캐주얼백팩'])
+  // 소분류 선택 시 드러나는 추가 옵션 (예: 신발 → {'사이즈': '250'})
+  categoryOptions?: Record<string, string>;
   feature?: string;
   quantity?: number;
   tags?: string[];                 // 태그 (최대 5개)
@@ -43,7 +45,7 @@ export interface Settings {
   model: 'flash' | 'pro';        // gemini-2.0-flash | gemini-1.5-pro
   fxRate: number;                 // 환율 (기본 9.3)
   shipping: number;               // 배송비 (기본 3500)
-  feeRate: number;                // 수수료율 (기본 0.03)
+  feeRate: number;                // 수수료율 (기본 0.06)
   dark: boolean;
   accent: string;                 // CSS 컬러 (기본 '#151515')
   autoScan: boolean;              // PWA 자동 스캔
@@ -53,7 +55,7 @@ export const DEFAULT_SETTINGS: Settings = {
   model: 'flash',
   fxRate: 9.3,
   shipping: 3500,
-  feeRate: 0.03,
+  feeRate: 0.06,
   dark: false,
   accent: '#151515',
   autoScan: true,
@@ -83,9 +85,27 @@ export interface InjectResult {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// 카테고리 트리
+// ────────────────────────────────────────────────────────────────────
+export interface CategoryTreeNode {
+  name: string;
+  children?: CategoryTreeNode[];
+}
+
+// 소분류 선택 시 추가로 노출되는 옵션 그룹 (예: 사이즈, 색상)
+export interface CategoryOptionGroup {
+  name: string;       // 그룹명 (예: '사이즈')
+  options: string[];  // 선택지 (예: ['230','235','240'])
+}
+
+// ────────────────────────────────────────────────────────────────────
 // 컨텍스트 간 메시지 타입
 // ────────────────────────────────────────────────────────────────────
 export type ExtMessage =
-  | { type: 'inject';        product: Product }
-  | { type: 'inject:result'; results: InjectResult[] }
-  | { type: 'tab:url';       url: string; isBunjang: boolean };
+  | { type: 'inject';            product: Product }
+  | { type: 'inject:result';     results: InjectResult[] }
+  | { type: 'tab:url';           url: string; isBunjang: boolean }
+  | { type: 'category:tree' }
+  | { type: 'category:tree:result';    ok: boolean; tree?: CategoryTreeNode[]; error?: string }
+  | { type: 'category:options';        path: string[] }
+  | { type: 'category:options:result'; ok: boolean; groups?: CategoryOptionGroup[]; error?: string };

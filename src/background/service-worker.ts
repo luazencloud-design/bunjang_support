@@ -19,36 +19,51 @@ chrome.runtime.onInstalled.addListener(() => {
 // ────────────────────────────────────────────────────────────────────
 // 메시지 라우팅: SidePanel → content script
 // ────────────────────────────────────────────────────────────────────
+// 활성 번개장터 탭으로 메시지 전달 (공통 헬퍼)
+function forwardToBunjangTab(
+  msg: ExtMessage,
+  errorType: string,
+  sendResponse: (resp: unknown) => void,
+): void {
+  chrome.tabs.query({ active: true, lastFocusedWindow: true }, ([tab]) => {
+    if (!tab?.id) {
+      sendResponse({ type: errorType, ok: false, error: '활성 탭 없음', results: [{ field: 'all', ok: false, error: '활성 탭 없음' }] });
+      return;
+    }
+    if (!tab.url?.includes('bunjang.co.kr')) {
+      sendResponse({ type: errorType, ok: false, error: '번개장터 페이지가 아님: ' + tab.url, results: [{ field: 'all', ok: false, error: '번개장터 페이지가 아님: ' + tab.url }] });
+      return;
+    }
+    chrome.tabs.sendMessage(tab.id, msg, (response) => {
+      if (chrome.runtime.lastError) {
+        const errMsg = 'content script 연결 실패: ' + chrome.runtime.lastError.message;
+        sendResponse({ type: errorType, ok: false, error: errMsg, results: [{ field: 'all', ok: false, error: errMsg }] });
+      } else {
+        sendResponse(response);
+      }
+    });
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
   if (!isExtMessage(msg)) return;
 
   if (msg.type === 'inject') {
-    // currentWindow 대신 lastFocusedWindow — 서비스 워커엔 "현재 창" 개념 없음
-    chrome.tabs.query({ active: true, lastFocusedWindow: true }, ([tab]) => {
-      console.log('[SW] inject 수신, 탭:', tab?.id, tab?.url);
-
-      if (!tab?.id) {
-        sendResponse({ type: 'inject:result', results: [{ field: 'all', ok: false, error: '활성 탭 없음' }] });
-        return;
-      }
-
-      if (!tab.url?.includes('bunjang.co.kr')) {
-        sendResponse({ type: 'inject:result', results: [{ field: 'all', ok: false, error: '번개장터 페이지가 아님: ' + tab.url }] });
-        return;
-      }
-
-      console.log('[SW] content script에 sendMessage 시도, tabId:', tab.id);
-      chrome.tabs.sendMessage(tab.id, msg, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error('[SW] sendMessage 실패:', chrome.runtime.lastError.message);
-          sendResponse({ type: 'inject:result', results: [{ field: 'all', ok: false, error: 'content script 연결 실패: ' + chrome.runtime.lastError.message }] });
-        } else {
-          console.log('[SW] content script 응답:', response);
-          sendResponse(response);
-        }
-      });
-    });
+    console.log('[SW] inject 수신');
+    forwardToBunjangTab(msg, 'inject:result', sendResponse);
     return true; // 비동기 응답 허용
+  }
+
+  if (msg.type === 'category:tree') {
+    console.log('[SW] category:tree 수신');
+    forwardToBunjangTab(msg, 'category:tree:result', sendResponse);
+    return true;
+  }
+
+  if (msg.type === 'category:options') {
+    console.log('[SW] category:options 수신', msg.path);
+    forwardToBunjangTab(msg, 'category:options:result', sendResponse);
+    return true;
   }
 });
 

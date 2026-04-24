@@ -6,7 +6,12 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { generateProductInfo, generateTags } from '../lib/gemini';
 import { saveImage, loadImageAsDataURL, deleteImage } from '../lib/images';
-import { draft as draftStore, settings as settingsStore } from '../lib/storage';
+import {
+  draft as draftStore,
+  settings as settingsStore,
+  categoryOptionsCache,
+} from '../lib/storage';
+import { DEFAULT_CATEGORY_TREE, CATEGORY_EXTRA_OPTIONS } from '../lib/bunjang-categories';
 
 const useStateSP = useState;
 const useEffectSP = useEffect;
@@ -19,7 +24,7 @@ const DEFAULT_AI_SETTINGS = {
   model: 'flash',          // 'flash' | 'pro'
   fxRate: 9.3,
   shipping: 3500,
-  feeRate: 0.03,
+  feeRate: 0.06,
   dark: false,
   accent: '#151515',
   autoScan: true,
@@ -116,6 +121,7 @@ const sidepanelCss = `
   .sp-btn.primary{ background: var(--ink); color: white; }
   .sp-btn.block{ width: 100%; padding: 10px 12px; }
   .sp-btn.sm{ padding: 6px 10px; font-size: 11.5px; }
+  .sp-btn.xs{ padding: 3px 8px; font-size: 10.5px; border-radius: 4px; }
 
   /* Icon button */
   .sp-icon-btn{
@@ -525,7 +531,14 @@ function SidePanel({ tweaks }){
     imgs: [],            // IndexedDB 키 배열 (예: ['img:1714...-abc'])
     tags: [],
     categoryPath: [],    // [대분류, 중분류, 소분류]
+    categoryOptions: {}, // 소분류 추가 옵션 (예: { '사이즈': '250' })
   });
+  // 카테고리 트리 (번개장터에서 동기화) + 추가 옵션 캐시
+  // 기본값 = 번장 카테고리 스냅샷, 동기화 누르면 실제 페이지에서 덮어씀
+  const [catTree] = useStateSP(DEFAULT_CATEGORY_TREE);
+  const [catTreeLoading, setCatTreeLoading] = useStateSP(false);
+  const [catOptionsCache, setCatOptionsCache] = useStateSP({}); // { 'a>b>c': CategoryOptionGroup[] }
+  const [catOptionsLoading, setCatOptionsLoading] = useStateSP(false);
   // Settings (chrome.storage.local 영구 저장)
   const [appSettings, setAppSettings] = useStateSP(DEFAULT_AI_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useStateSP(false);
@@ -548,6 +561,7 @@ function SidePanel({ tweaks }){
 
   // ── Phase 1: 실제 메시지 연결 ──
   const [injecting, setInjecting] = useStateSP(false);
+  const [clearing, setClearing] = useStateSP(false);
   const [diagResults, setDiagResults] = useStateSP(null); // null = 미실행
   const [currentUrl, setCurrentUrl] = useStateSP('');
   const [isBunjang, setIsBunjang] = useStateSP(false);
@@ -582,9 +596,10 @@ function SidePanel({ tweaks }){
     (async () => {
       try {
         if (typeof chrome !== 'undefined' && chrome.storage) {
-          const [savedDraft, savedSettings] = await Promise.all([
+          const [savedDraft, savedSettings, savedOptsCache] = await Promise.all([
             draftStore.get(),
             settingsStore.get(),
+            categoryOptionsCache.getAll(),
           ]);
           if (!alive) return;
           if (savedDraft) {
@@ -593,10 +608,15 @@ function SidePanel({ tweaks }){
               ...savedDraft,
               imgs: Array.isArray(savedDraft.imgs) ? savedDraft.imgs : [],
               tags: Array.isArray(savedDraft.tags) ? savedDraft.tags : [],
+              categoryOptions: (savedDraft.categoryOptions && typeof savedDraft.categoryOptions === 'object')
+                ? savedDraft.categoryOptions : {},
             }));
           }
           if (savedSettings) {
             setAppSettings(s => ({ ...s, ...savedSettings }));
+          }
+          if (savedOptsCache && typeof savedOptsCache === 'object') {
+            setCatOptionsCache(savedOptsCache);
           }
         }
       } catch (e) {
@@ -764,6 +784,116 @@ function SidePanel({ tweaks }){
     }
   }
 
+  // ── 카테고리 트리 동기화 — m.bunjang.co.kr/products/new 에서 직접 추출 ──
+  async function handleSyncCategoryTree() {
+    if (catTreeLoading) return;
+    if (typeof chrome === 'undefined' || !chrome.runtime) {
+      showToast('Chrome 확장 컨텍스트에서만 사용 가능');
+      return;
+    }
+    if (!isBunjang) {
+      showToast('번개장터 상품등록 페이지를 열고 시도하세요');
+      return;
+    }
+    setCatTreeLoading(true);
+    showToast('카테고리 동기화 중... 30~60초 소요');
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'category:tree' });
+      if (resp?.ok && Array.isArray(resp.tree)) {
+        setCatTree(resp.tree);
+        setCatTreeSynced(true);
+        await categoryTreeStore.set(resp.tree);
+        // 캐시도 초기화 (트리가 바뀌면 옵션 캐시 무효)
+        await categoryOptionsCache.clear();
+        setCatOptionsCache({});
+        showToast(`카테고리 ${resp.tree.length}개 동기화 완료`);
+      } else {
+        showToast('동기화 실패: ' + (resp?.error || '응답 없음'));
+      }
+    } catch (e) {
+      showToast('동기화 실패: ' + (e?.message || String(e)));
+    } finally {
+      setCatTreeLoading(false);
+    }
+  }
+
+  // ── 추가 옵션 가져오기 (소분류 선택 시 lazy 호출) ──
+  async function fetchCategoryOptions(path) {
+    if (!path || path.length < 1) return [];
+    const key = path.join('>');
+    if (catOptionsCache[key]) return catOptionsCache[key];
+    if (typeof chrome === 'undefined' || !chrome.runtime) return [];
+    if (!isBunjang) return [];
+    setCatOptionsLoading(true);
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'category:options', path });
+      if (resp?.ok && Array.isArray(resp.groups)) {
+        const next = { ...catOptionsCache, [key]: resp.groups };
+        setCatOptionsCache(next);
+        await categoryOptionsCache.set(path, resp.groups);
+        return resp.groups;
+      } else {
+        // 옵션이 없는 카테고리는 빈 배열로 캐시
+        const next = { ...catOptionsCache, [key]: [] };
+        setCatOptionsCache(next);
+        await categoryOptionsCache.set(path, []);
+        return [];
+      }
+    } catch (e) {
+      console.warn('[sidepanel] 옵션 가져오기 실패:', e);
+      return [];
+    } finally {
+      setCatOptionsLoading(false);
+    }
+  }
+
+  // 카테고리 경로 변경 헬퍼 — level까지 setting하고 그 뒤 레벨은 비움
+  function setCategoryLevel(level, value) {
+    const next = [...(product.categoryPath || [])];
+    while (next.length <= level) next.push('');
+    next[level] = value;
+    // 뒤쪽 레벨 초기화
+    next.length = level + 1;
+    while (next.length > 0 && !next[next.length - 1]) next.pop();
+    setProduct(p => ({ ...p, categoryPath: next, categoryOptions: {} }));
+    // 추가 옵션: CATEGORY_EXTRA_OPTIONS에 없으면 page-fetch 시도
+    if (value && next.length >= 2) {
+      const key = next.join('>');
+      if (!CATEGORY_EXTRA_OPTIONS[key]) {
+        // 소분류(level 2) 까지 선택된 경우에만 fetch
+        if (level === 2) fetchCategoryOptions(next);
+      }
+    }
+  }
+
+  // 현재 경로의 옵션 그룹 — CATEGORY_EXTRA_OPTIONS 우선, 없으면 page-fetch 캐시
+  const currentCatOptions = useMemoSP(() => {
+    const path = product.categoryPath || [];
+    if (path.length < 2) return [];
+    const key = path.join('>');
+    // 1. 하드코딩된 추가 옵션 (신발 사이즈 등) — 즉시 노출
+    if (CATEGORY_EXTRA_OPTIONS[key]) return CATEGORY_EXTRA_OPTIONS[key];
+    // 2. page-fetch 캐시 (소분류까지 선택된 경우만)
+    if (path.length >= 3 && path[2]) return catOptionsCache[key] || [];
+    return [];
+  }, [product.categoryPath, catOptionsCache]);
+
+  // 트리 헬퍼: level별 children 조회
+  function getLevelOptions(level) {
+    const path = product.categoryPath || [];
+    if (level === 0) return catTree.map(n => n.name);
+    if (level === 1) {
+      const l0 = catTree.find(n => n.name === path[0]);
+      return (l0?.children ?? []).map(n => n.name);
+    }
+    if (level === 2) {
+      const l0 = catTree.find(n => n.name === path[0]);
+      const l1 = l0?.children?.find(n => n.name === path[1]);
+      return (l1?.children ?? []).map(n => n.name);
+    }
+    return [];
+  }
+
   // ── 이미지 추가 (파일 선택 또는 드래그&드롭) ──
   const handleAddImages = useCallback(async (files) => {
     if (!files || files.length === 0) return;
@@ -806,7 +936,7 @@ function SidePanel({ tweaks }){
   }
 
   async function handleInject() {
-    if (injecting) return;
+    if (injecting || clearing) return;
     if (typeof chrome === 'undefined' || !chrome.runtime) {
       showToast('Chrome 확장 컨텍스트에서만 사용 가능');
       return;
@@ -827,6 +957,37 @@ function SidePanel({ tweaks }){
       showToast('오류: ' + (e?.message || String(e)));
     } finally {
       setInjecting(false);
+    }
+  }
+
+  // ── 새 상품 등록 — 현재 초안(이미지 포함) 전부 초기화 ──
+  async function handleRegisterNew() {
+    if (clearing || injecting) return;
+    setClearing(true);
+    try {
+      // IndexedDB 이미지 삭제
+      for (const k of (product.imgs || [])) {
+        if (typeof k === 'string' && k.startsWith('img:')) {
+          try { await deleteImage(k); } catch {}
+        }
+      }
+      // chrome.storage 초안 삭제
+      if (typeof chrome !== 'undefined' && chrome.storage) {
+        await draftStore.clear();
+      }
+      // 폼 상태 전체 초기화
+      setProduct({ title:'', cost:0, price:0, desc:'', imgs:[], tags:[], categoryPath:[], categoryOptions:{} });
+      setAiInputs({ brand:'', model:'', feature:'' });
+      setAiTitles(DEFAULT_AI_TITLES);
+      setAiSelected(null);
+      setAiDesc(null);
+      setImgPreviews({});
+      setDiagResults(null);
+      showToast('새 상품 등록 준비 완료 — 초안이 초기화됐습니다');
+    } catch (e) {
+      showToast('초기화 실패: ' + (e?.message || String(e)));
+    } finally {
+      setClearing(false);
     }
   }
 
@@ -884,8 +1045,15 @@ function SidePanel({ tweaks }){
 
       {/* Persistent action bar (always visible) */}
       <div className="sp-actionbar">
-        <button className="sp-btn accent" style={{flex:1, opacity: injecting ? 0.7 : 1}} onClick={handleInject} disabled={injecting}>
-          {injecting ? <>{SPI.spin()} 주입 중…</> : <>{SPI.cart()} 번개장터 자동입력</>}
+        <button className="sp-btn primary" style={{flex:3, opacity: (injecting||clearing) ? 0.65 : 1}}
+          onClick={handleInject} disabled={injecting || clearing}
+          title="현재 열려있는 번개장터 상품등록 페이지에 자동입력">
+          {injecting ? <>{SPI.spin()} 입력 중…</> : <>{SPI.cart()} 번개장터 자동입력</>}
+        </button>
+        <button className="sp-btn" style={{flex:1, opacity: (injecting||clearing) ? 0.65 : 1}}
+          onClick={handleRegisterNew} disabled={injecting || clearing}
+          title="초안과 이미지를 초기화하고 새 상품 작성 시작">
+          {clearing ? <>{SPI.spin()}</> : <>+ 새 상품</>}
         </button>
       </div>
 
@@ -1063,29 +1231,66 @@ function SidePanel({ tweaks }){
             )}
           </div>
 
-          {/* 카테고리 — 대/중/소 3단계 (자동입력 시 순차 클릭) */}
+          {/* 카테고리 — 하드코딩 트리 기반 cascading dropdown */}
           <div className="sp-field">
-            <label className="sp-label">
-              카테고리
-              <span style={{marginLeft:'auto', fontSize:10, color:'var(--ink-3)'}}>
-                대분류 / 중분류 / 소분류
-              </span>
-            </label>
+            <label className="sp-label">카테고리</label>
+
             <div className="sp-row">
-              {[0,1,2].map(i => (
-                <input key={i} className="sp-input"
-                  placeholder={['대분류','중분류','소분류'][i]}
-                  value={product.categoryPath?.[i] || ''}
-                  onChange={e => {
-                    const next = [...(product.categoryPath || ['','',''])];
-                    while (next.length < 3) next.push('');
-                    next[i] = e.target.value;
-                    // 빈 값 뒤쪽은 잘라냄
-                    while (next.length > 0 && !next[next.length-1]) next.pop();
-                    setProduct({...product, categoryPath: next});
-                  }}/>
-              ))}
+              {[0,1,2].map(i => {
+                const opts = getLevelOptions(i);
+                const value = product.categoryPath?.[i] || '';
+                const disabled = i > 0 && !product.categoryPath?.[i-1];
+                return (
+                  <select key={i} className="sp-input"
+                    value={value}
+                    disabled={disabled}
+                    onChange={e => setCategoryLevel(i, e.target.value)}
+                    style={{cursor: !disabled && opts.length > 0 ? 'pointer' : 'not-allowed'}}>
+                    <option value="">{['대분류','중분류','소분류'][i]}</option>
+                    {opts.map(name => (
+                      <option key={name} value={name}>{name}</option>
+                    ))}
+                  </select>
+                );
+              })}
             </div>
+
+            {catOptionsLoading && (
+              <div style={{fontSize:10, color:'var(--ink-3)', marginTop:4}}>
+                추가 옵션 확인 중…
+              </div>
+            )}
+
+            {/* 추가 옵션 (사이즈 등) — 소분류 선택 시 자동 노출 */}
+            {currentCatOptions.length > 0 && (
+              <div style={{marginTop:8, padding:8,
+                          background:'var(--surface-2)', borderRadius:6,
+                          border:'1px solid var(--line)'}}>
+                <div style={{fontSize:10, color:'var(--ink-3)', marginBottom:6}}>
+                  추가 옵션
+                </div>
+                <div style={{display:'flex', flexDirection:'column', gap:6}}>
+                  {currentCatOptions.map(group => (
+                    <div key={group.name} style={{display:'flex', gap:6, alignItems:'center'}}>
+                      <span style={{fontSize:11, minWidth:50, color:'var(--ink-2)'}}>
+                        {group.name}
+                      </span>
+                      <select className="sp-input" style={{flex:1}}
+                        value={(product.categoryOptions || {})[group.name] || ''}
+                        onChange={e => setProduct(p => ({
+                          ...p,
+                          categoryOptions: { ...(p.categoryOptions || {}), [group.name]: e.target.value },
+                        }))}>
+                        <option value="">선택</option>
+                        {group.options.map(opt => (
+                          <option key={opt} value={opt}>{opt}</option>
+                        ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* 상품 상태 — 번개장터 실제 값과 동일 */}

@@ -1,6 +1,8 @@
 // Gemini API 클라이언트 — 번개장터 일본 직구 상품명/설명/태그 생성
 // 의존성 없이 fetch만 사용 (Chrome 확장 환경)
 
+import { DEFAULT_CATEGORY_TREE } from './bunjang-categories';
+
 // ────────────────────────────────────────────────────────────────────
 // 타입
 // ────────────────────────────────────────────────────────────────────
@@ -42,6 +44,16 @@ const MODEL_MAP: Record<GeminiModel, string> = {
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 // ────────────────────────────────────────────────────────────────────
+// 카테고리 트리 → 프롬프트용 텍스트 (L1: L2, L2, L2 형식)
+// ────────────────────────────────────────────────────────────────────
+const CATEGORY_TREE_TEXT = DEFAULT_CATEGORY_TREE
+  .map(l1 => {
+    const l2s = (l1.children ?? []).map(l2 => l2.name).join(', ');
+    return l2s ? `${l1.name}: ${l2s}` : l1.name;
+  })
+  .join('\n');
+
+// ────────────────────────────────────────────────────────────────────
 // 프롬프트 생성
 // ────────────────────────────────────────────────────────────────────
 
@@ -81,10 +93,14 @@ ${priceLine}
 - 최대 5개, 브랜드·모델·용도·특징 위주
 
 [카테고리 작성 지침]
-- 번개장터 카테고리 트리에 맞는 대분류/중분류/소분류 3단계 경로 제시
-- 대분류 예시: 여성의류, 남성의류, 신발, 가방/지갑, 시계, 쥬얼리, 패션 액세서리, 디지털, 가전, 스포츠, 출산/유아동, 뷰티, 도서/티켓, 가구/인테리어, 식품, 반려동물 등
-- 정확한 번개장터 분류명을 사용하되, 모르는 경우 가장 가까운 일반 분류명 사용
-- 정확히 3개 항목 ([대, 중, 소])
+아래는 번개장터 실제 카테고리 트리입니다. 반드시 이 목록에서 정확한 명칭을 골라야 합니다.
+형식: 대분류: 중분류1, 중분류2, ...
+
+${CATEGORY_TREE_TEXT}
+
+- 위 목록에서 상품에 맞는 대분류와 중분류를 정확히 선택하세요 (철자 동일하게)
+- 소분류가 있으면 포함, 없으면 빈 문자열("") 사용
+- 반드시 ["대분류", "중분류", "소분류 또는 빈 문자열"] 형태로 정확히 3개 항목 반환
 
 [출력 JSON 스키마]
 반드시 아래 스키마를 정확히 따르는 JSON만 반환하세요. 다른 텍스트는 포함하지 마세요.
@@ -227,15 +243,18 @@ export async function generateProductInfo(
   // tags 최대 5개로 잘라냄 (API가 초과 반환할 경우 대비)
   output.tags = output.tags.slice(0, 5);
 
-  // categoryPath 검증 — 유효하지 않으면 빈 배열로 설정 (부분 출력 허용)
+  // categoryPath 검증 — 최소 대분류+중분류(2개), 최대 3개
   if (
     !Array.isArray(output.categoryPath) ||
-    output.categoryPath.length !== 3 ||
+    output.categoryPath.length < 2 ||
     !output.categoryPath.every((item) => typeof item === 'string')
   ) {
     output.categoryPath = [];
   } else {
-    output.categoryPath = output.categoryPath.slice(0, 3);
+    // 빈 소분류 제거 (["신발","스니커즈",""] → ["신발","스니커즈"])
+    output.categoryPath = output.categoryPath
+      .slice(0, 3)
+      .filter((s, i) => i < 2 || s.trim() !== '');
   }
 
   return output;

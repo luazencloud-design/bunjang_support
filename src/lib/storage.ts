@@ -1,7 +1,7 @@
 // chrome.storage.local 래퍼
 // 사이드패널 / background 에서만 사용 (content script는 chrome.storage 접근 가능하지만 기본적으로 안 씀)
 
-import type { Product, Template, Settings } from './types';
+import type { Product, Template, Settings, CategoryTreeNode, CategoryOptionGroup } from './types';
 import { DEFAULT_SETTINGS } from './types';
 
 // ────────────────────────────────────────────────────────────────────
@@ -22,10 +22,12 @@ export const storage = {
 // 키 상수
 // ────────────────────────────────────────────────────────────────────
 const KEYS = {
-  DRAFT:     'draft',       // 현재 작성 중인 폼 (Product 부분)
-  TEMPLATES: 'templates',   // Template[]
-  SETTINGS:  'settings',    // Settings
-  HISTORY:   'history',     // Product[] (등록 완료)
+  DRAFT:        'draft',         // 현재 작성 중인 폼 (Product 부분)
+  TEMPLATES:    'templates',     // Template[]
+  SETTINGS:     'settings',      // Settings
+  HISTORY:      'history',       // Product[] (등록 완료)
+  CATEGORY_TREE:'categoryTree',  // CategoryTreeNode[] (번개장터 동기화 결과)
+  CATEGORY_OPTS:'categoryOptions', // Record<pathKey, CategoryOptionGroup[]> 캐시
 } as const;
 
 // ────────────────────────────────────────────────────────────────────
@@ -68,6 +70,32 @@ export const settings = {
     storage.get<Settings>(KEYS.SETTINGS).then(current =>
       storage.set(KEYS.SETTINGS, { ...DEFAULT_SETTINGS, ...current, ...data })
     ),
+};
+
+// ────────────────────────────────────────────────────────────────────
+// 카테고리 트리 + 옵션 캐시
+// ────────────────────────────────────────────────────────────────────
+export const categoryTree = {
+  get: (): Promise<CategoryTreeNode[] | undefined> =>
+    storage.get<CategoryTreeNode[]>(KEYS.CATEGORY_TREE),
+
+  set: (tree: CategoryTreeNode[]): Promise<void> =>
+    storage.set(KEYS.CATEGORY_TREE, tree),
+
+  clear: (): Promise<void> => storage.remove(KEYS.CATEGORY_TREE),
+};
+
+export const categoryOptionsCache = {
+  getAll: (): Promise<Record<string, CategoryOptionGroup[]>> =>
+    storage.get<Record<string, CategoryOptionGroup[]>>(KEYS.CATEGORY_OPTS).then(r => r ?? {}),
+
+  set: async (path: string[], groups: CategoryOptionGroup[]): Promise<void> => {
+    const all = await categoryOptionsCache.getAll();
+    all[path.join('>')] = groups;
+    return storage.set(KEYS.CATEGORY_OPTS, all);
+  },
+
+  clear: (): Promise<void> => storage.remove(KEYS.CATEGORY_OPTS),
 };
 
 // ────────────────────────────────────────────────────────────────────

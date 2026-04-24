@@ -8,6 +8,7 @@
 
 import type { ExtMessage, InjectResult, Product } from '../lib/types';
 import { isExtMessage } from '../lib/messaging';
+import { loadImageAsFile } from '../lib/images';
 
 console.log('[bunjang-helper] content script loaded on', location.href);
 
@@ -216,10 +217,28 @@ async function injectProduct(product: Product): Promise<InjectResult[]> {
     }
   }
 
-  // 이미지 — Phase 2에서 IndexedDB 연동 예정, 현재는 빈 배열이면 skip
+  // 이미지 — IndexedDB 키로 File 복원 후 주입
   if (product.imgs && product.imgs.length > 0) {
-    // TODO Phase 2: IndexedDB에서 실제 File 객체 로드 후 주입
-    results.push({ field: 'images', ok: false, error: 'Phase 2에서 구현 예정 (IndexedDB 연동 필요)' });
+    try {
+      const filePromises = product.imgs.map(key => loadImageAsFile(key));
+      const filesNullable = await Promise.all(filePromises);
+      const files = filesNullable.filter((f): f is File => f !== null);
+      if (files.length === 0) {
+        results.push({ field: 'images', ok: false, error: 'IndexedDB에서 이미지를 복원하지 못함' });
+      } else if (files.length < product.imgs.length) {
+        // 일부 누락이지만 있는 것만이라도 주입
+        const r = await injectImages(files);
+        results.push({
+          ...r,
+          ok: r.ok,
+          error: r.error ?? `${files.length}/${product.imgs.length}개만 복원됨`,
+        });
+      } else {
+        results.push(await injectImages(files));
+      }
+    } catch (e) {
+      results.push({ field: 'images', ok: false, error: 'IndexedDB 로드 실패: ' + String(e) });
+    }
   }
 
   return results;

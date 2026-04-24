@@ -3,12 +3,41 @@
 // NOTE: Adapted from design bundle (Claude Design). Only the React import block
 // and the bottom export were changed — UI markup/styles are verbatim.
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { generateProductInfo, generateTags } from '../lib/gemini';
+import { saveImage, loadImageAsDataURL, deleteImage } from '../lib/images';
+import {
+  draft as draftStore,
+  settings as settingsStore,
+  categoryOptionsCache,
+} from '../lib/storage';
+import { DEFAULT_CATEGORY_TREE, CATEGORY_EXTRA_OPTIONS } from '../lib/bunjang-categories';
 
 const useStateSP = useState;
 const useEffectSP = useEffect;
 const useMemoSP = useMemo;
 const useRefSP = useRef;
+
+// Settings 기본값 (storage.ts의 DEFAULT_SETTINGS와 동일하게 유지)
+const DEFAULT_AI_SETTINGS = {
+  apiKey: '',
+  model: 'flash',          // 'flash' | 'pro'
+  fxRate: 9.3,
+  shipping: 3500,
+  feeRate: 0.06,
+  dark: false,
+  accent: '#151515',
+  autoScan: true,
+};
+
+// 기본 AI 상품명 (Gemini 호출 전 placeholder)
+const DEFAULT_AI_TITLES = [
+  { key: 'seo',    label: '최대 검색 노출', text: '브랜드 + 모델 + 특징을 입력하고 생성 버튼을 눌러주세요' },
+  { key: 'simple', label: '간결 직관',      text: '—' },
+  { key: 'rare',   label: '한정 · 희소성',  text: '—' },
+  { key: 'cond',   label: '상태 · 컨디션',  text: '—' },
+  { key: 'jp',     label: '일본어 병기',    text: '—' },
+];
 
 const sidepanelCss = `
   .sp-root{
@@ -92,6 +121,7 @@ const sidepanelCss = `
   .sp-btn.primary{ background: var(--ink); color: white; }
   .sp-btn.block{ width: 100%; padding: 10px 12px; }
   .sp-btn.sm{ padding: 6px 10px; font-size: 11.5px; }
+  .sp-btn.xs{ padding: 3px 8px; font-size: 10.5px; border-radius: 4px; }
 
   /* Icon button */
   .sp-icon-btn{
@@ -445,6 +475,15 @@ const sidepanelCss = `
   .sp-live-dot {
     animation: sp-live-pulse 2.4s ease-in-out infinite !important;
   }
+
+  /* Spinner — rotation */
+  @keyframes sp-spin {
+    to { transform: rotate(360deg); }
+  }
+  .sp-spin-icon {
+    animation: sp-spin 0.7s linear infinite;
+    transform-origin: 50% 50%;
+  }
 `;
 
 // Reuse Icon from popup.jsx (it's on window via script order)
@@ -459,7 +498,7 @@ const SPI = {
   carrot: () => (<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M11 3.5L9.5 2L2.5 9L4 13.5L8 12L13.5 6.5L11 3.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>),
   settings: () => (<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.3"/><path d="M8 1.5V3M8 13V14.5M1.5 8H3M13 8H14.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>),
   history: () => (<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 8a6 6 0 1 0 1.8-4.3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/><path d="M2 2v3h3M8 5v3l2 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>),
-  spin: () => (<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" opacity="0.25"/><path d="M10.5 6A4.5 4.5 0 0 0 6 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>),
+  spin: () => (<svg className="sp-spin-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" style={{display:'inline-block', verticalAlign:'middle'}}><circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" opacity="0.25"/><path d="M10.5 6A4.5 4.5 0 0 0 6 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>),
 };
 
 function stripedSP(seed){
@@ -485,29 +524,52 @@ function SPSection({ id, title, meta, defaultOpen = true, children }){
 
 function SidePanel({ tweaks }){
   const [product, setProduct] = useStateSP({
-    title: '아디다스 삼바 OG 블랙 화이트 270',
-    cost: 8900,
-    price: 139000,
-    desc: '일본 직구 정품. 2024년 구매, 2회 착용. 박스/택 포함.\n사이즈 US 9.5 (270mm).',
-    imgs: [stripedSP(0), stripedSP(1), stripedSP(2)],
+    title: '',
+    cost: 0,
+    price: 0,
+    desc: '',
+    imgs: [],            // IndexedDB 키 배열 (예: ['img:1714...-abc'])
+    tags: [],
+    categoryPath: [],    // [대분류, 중분류, 소분류]
+    categoryOptions: {}, // 소분류 추가 옵션 (예: { '사이즈': '250' })
   });
-  const [fx] = useStateSP(9.3);
-  const [shipping] = useStateSP(3500);
-  const [feeRate] = useStateSP(0.03);
+  // 카테고리 트리 (번개장터에서 동기화) + 추가 옵션 캐시
+  // 기본값 = 번장 카테고리 스냅샷, 동기화 누르면 실제 페이지에서 덮어씀
+  const [catTree] = useStateSP(DEFAULT_CATEGORY_TREE);
+  const [catTreeLoading, setCatTreeLoading] = useStateSP(false);
+  const [catOptionsCache, setCatOptionsCache] = useStateSP({}); // { 'a>b>c': CategoryOptionGroup[] }
+  const [catOptionsLoading, setCatOptionsLoading] = useStateSP(false);
+  // Settings (chrome.storage.local 영구 저장)
+  const [appSettings, setAppSettings] = useStateSP(DEFAULT_AI_SETTINGS);
+  const [settingsOpen, setSettingsOpen] = useStateSP(false);
+  const [settingsLoaded, setSettingsLoaded] = useStateSP(false);
+
   const [toast, setToast] = useStateSP(null);
+  const [aiTitles, setAiTitles] = useStateSP(DEFAULT_AI_TITLES);
   const [aiSelected, setAiSelected] = useStateSP(null);
   const [aiLoading, setAiLoading] = useStateSP(false);
   const [aiDesc, setAiDesc] = useStateSP(null);   // AI 생성 설명 초안 (null = 미생성)
   const [tagLoading, setTagLoading] = useStateSP(false);
   const [tplActive, setTplActive] = useStateSP(0);
   // 브랜드/모델/특징 — AI 섹션 + 태그 생성 공용
-  const [aiInputs, setAiInputs] = useStateSP({ brand: '아디다스', model: '삼바 OG', feature: 'S급, 정품' });
+  const [aiInputs, setAiInputs] = useStateSP({ brand: '', model: '', feature: '' });
+
+  // 이미지 미리보기 (key → dataURL) 캐시 — IndexedDB에서 비동기 로드
+  const [imgPreviews, setImgPreviews] = useStateSP({});
+  const [dragOverIdx, setDragOverIdx] = useStateSP(null);
+  const fileInputRef = useRefSP(null);
 
   // ── Phase 1: 실제 메시지 연결 ──
   const [injecting, setInjecting] = useStateSP(false);
+  const [clearing, setClearing] = useStateSP(false);
   const [diagResults, setDiagResults] = useStateSP(null); // null = 미실행
   const [currentUrl, setCurrentUrl] = useStateSP('');
   const [isBunjang, setIsBunjang] = useStateSP(false);
+
+  // 마진 계산용 — settings에서 동기화
+  const fx = appSettings.fxRate;
+  const shipping = appSettings.shipping;
+  const feeRate = appSettings.feeRate;
 
   // 현재 탭 URL 초기화 + tab:url 메시지 수신
   useEffectSP(() => {
@@ -528,6 +590,85 @@ function SidePanel({ tweaks }){
     return () => chrome.runtime.onMessage.removeListener(onMessage);
   }, []);
 
+  // ── 초안 + 설정 로드 (mount 1회) ──
+  useEffectSP(() => {
+    let alive = true;
+    (async () => {
+      try {
+        if (typeof chrome !== 'undefined' && chrome.storage) {
+          const [savedDraft, savedSettings, savedOptsCache] = await Promise.all([
+            draftStore.get(),
+            settingsStore.get(),
+            categoryOptionsCache.getAll(),
+          ]);
+          if (!alive) return;
+          if (savedDraft) {
+            setProduct(p => ({
+              ...p,
+              ...savedDraft,
+              imgs: Array.isArray(savedDraft.imgs) ? savedDraft.imgs : [],
+              tags: Array.isArray(savedDraft.tags) ? savedDraft.tags : [],
+              categoryOptions: (savedDraft.categoryOptions && typeof savedDraft.categoryOptions === 'object')
+                ? savedDraft.categoryOptions : {},
+            }));
+          }
+          if (savedSettings) {
+            setAppSettings(s => ({ ...s, ...savedSettings }));
+          }
+          if (savedOptsCache && typeof savedOptsCache === 'object') {
+            setCatOptionsCache(savedOptsCache);
+          }
+        }
+      } catch (e) {
+        console.warn('[sidepanel] storage 로드 실패:', e);
+      } finally {
+        if (alive) setSettingsLoaded(true);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  // ── 초안 자동 저장 (debounced 500ms) ──
+  useEffectSP(() => {
+    if (!settingsLoaded) return; // 초기 로드 전 덮어쓰기 방지
+    if (typeof chrome === 'undefined' || !chrome.storage) return;
+    const t = setTimeout(() => {
+      draftStore.set(product).catch(e => console.warn('[sidepanel] draft 저장 실패:', e));
+    }, 500);
+    return () => clearTimeout(t);
+  }, [product, settingsLoaded]);
+
+  // ── 설정 변경 시 즉시 저장 ──
+  useEffectSP(() => {
+    if (!settingsLoaded) return;
+    if (typeof chrome === 'undefined' || !chrome.storage) return;
+    settingsStore.set(appSettings).catch(e => console.warn('[sidepanel] settings 저장 실패:', e));
+  }, [appSettings, settingsLoaded]);
+
+  // ── 이미지 미리보기 로드 (product.imgs 변경 시 신규 키만 로드) ──
+  useEffectSP(() => {
+    if (typeof chrome === 'undefined' || !chrome.storage) return;
+    let alive = true;
+    const keysToLoad = (product.imgs || [])
+      .filter(k => typeof k === 'string' && k.startsWith('img:') && !imgPreviews[k]);
+    if (keysToLoad.length === 0) return;
+    (async () => {
+      const updates = {};
+      for (const key of keysToLoad) {
+        try {
+          const url = await loadImageAsDataURL(key);
+          if (url) updates[key] = url;
+        } catch (e) {
+          console.warn('[sidepanel] 이미지 로드 실패:', key, e);
+        }
+      }
+      if (alive && Object.keys(updates).length > 0) {
+        setImgPreviews(prev => ({ ...prev, ...updates }));
+      }
+    })();
+    return () => { alive = false; };
+  }, [product.imgs]);
+
   const margin = useMemoSP(()=>{
     const c = product.cost * fx;
     const fee = product.price * feeRate;
@@ -541,28 +682,261 @@ function SidePanel({ tweaks }){
     setTimeout(()=>setToast(null), 1600);
   }
 
-  // 태그 자동생성 — TODO Phase 2: Gemini API로 교체
+  // 태그 자동생성 — Gemini API 실 호출
   async function handleGenerateTags() {
     if (tagLoading) return;
+    if (!appSettings.apiKey) {
+      showToast('설정에서 Gemini API 키를 입력하세요');
+      setSettingsOpen(true);
+      return;
+    }
+    if (!aiInputs.brand && !aiInputs.model) {
+      showToast('브랜드 또는 모델명을 입력해주세요');
+      return;
+    }
     setTagLoading(true);
-    // mock: 브랜드/모델/특징에서 태그 추출
-    await new Promise(r => setTimeout(r, 500));
-    const raw = [
-      aiInputs.brand,
-      aiInputs.model,
-      '일본직구',
-      // feature에서 쉼표 분리 후 첫 단어들
-      ...aiInputs.feature.split(/[,，]/).map(f => f.trim()).filter(Boolean),
-    ].filter(Boolean);
-    // 중복 제거, 공백 없애기, 최대 5개
-    const tags = [...new Set(raw.map(t => t.replace(/\s+/g, '')))].slice(0, 5);
-    setProduct(p => ({...p, tags}));
-    setTagLoading(false);
-    showToast(`태그 ${tags.length}개 생성됨`);
+    try {
+      const tags = await generateTags(
+        {
+          brand: aiInputs.brand,
+          model: aiInputs.model,
+          feature: aiInputs.feature,
+        },
+        appSettings.apiKey,
+        appSettings.model,
+      );
+      setProduct(p => ({...p, tags}));
+      showToast(`태그 ${tags.length}개 생성됨`);
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === 'GEMINI_NO_KEY') {
+        showToast('API 키가 비어있습니다');
+        setSettingsOpen(true);
+      } else {
+        showToast('태그 생성 실패: ' + msg);
+      }
+    } finally {
+      setTagLoading(false);
+    }
+  }
+
+  // ── AI 상품명 + 설명 생성 — Gemini API 실 호출 ──
+  async function handleGenerateAI() {
+    if (aiLoading) return;
+    if (!appSettings.apiKey) {
+      showToast('설정에서 Gemini API 키를 입력하세요');
+      setSettingsOpen(true);
+      return;
+    }
+    if (!aiInputs.brand || !aiInputs.model) {
+      showToast('브랜드와 모델명을 모두 입력해주세요');
+      return;
+    }
+    setAiLoading(true);
+    setAiSelected(null);
+    setAiDesc(null);
+    try {
+      const out = await generateProductInfo(
+        {
+          brand: aiInputs.brand,
+          model: aiInputs.model,
+          feature: aiInputs.feature,
+          condition: product.condition,
+          cost: product.cost,
+          price: product.price,
+        },
+        appSettings.apiKey,
+        appSettings.model,
+      );
+      // titles 배열을 UI 포맷으로 변환
+      const mapped = out.titles.map((t, i) => ({
+        key: `ai-${i}`,
+        label: t.style,
+        text: t.title,
+      }));
+      setAiTitles(mapped);
+      setAiDesc(out.description);
+      setAiSelected(0);
+
+      // 모든 항목 자동 채움 — 첫 번째 상품명, 설명, 태그, 카테고리
+      setProduct(p => ({
+        ...p,
+        title: out.titles[0]?.title || p.title,
+        desc:  out.description       || p.desc,
+        tags:  Array.isArray(out.tags) && out.tags.length > 0 ? out.tags : p.tags,
+        categoryPath: Array.isArray(out.categoryPath) && out.categoryPath.length > 0
+          ? out.categoryPath
+          : p.categoryPath,
+      }));
+      showToast('AI로 모든 항목이 채워졌어요');
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === 'GEMINI_NO_KEY') {
+        showToast('API 키가 비어있습니다');
+        setSettingsOpen(true);
+      } else if (msg === 'GEMINI_PARSE_ERROR') {
+        showToast('AI 응답 파싱 실패 — 다시 시도해주세요');
+      } else {
+        showToast('AI 생성 실패: ' + msg);
+      }
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  // ── 카테고리 트리 동기화 — m.bunjang.co.kr/products/new 에서 직접 추출 ──
+  async function handleSyncCategoryTree() {
+    if (catTreeLoading) return;
+    if (typeof chrome === 'undefined' || !chrome.runtime) {
+      showToast('Chrome 확장 컨텍스트에서만 사용 가능');
+      return;
+    }
+    if (!isBunjang) {
+      showToast('번개장터 상품등록 페이지를 열고 시도하세요');
+      return;
+    }
+    setCatTreeLoading(true);
+    showToast('카테고리 동기화 중... 30~60초 소요');
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'category:tree' });
+      if (resp?.ok && Array.isArray(resp.tree)) {
+        setCatTree(resp.tree);
+        setCatTreeSynced(true);
+        await categoryTreeStore.set(resp.tree);
+        // 캐시도 초기화 (트리가 바뀌면 옵션 캐시 무효)
+        await categoryOptionsCache.clear();
+        setCatOptionsCache({});
+        showToast(`카테고리 ${resp.tree.length}개 동기화 완료`);
+      } else {
+        showToast('동기화 실패: ' + (resp?.error || '응답 없음'));
+      }
+    } catch (e) {
+      showToast('동기화 실패: ' + (e?.message || String(e)));
+    } finally {
+      setCatTreeLoading(false);
+    }
+  }
+
+  // ── 추가 옵션 가져오기 (소분류 선택 시 lazy 호출) ──
+  async function fetchCategoryOptions(path) {
+    if (!path || path.length < 1) return [];
+    const key = path.join('>');
+    if (catOptionsCache[key]) return catOptionsCache[key];
+    if (typeof chrome === 'undefined' || !chrome.runtime) return [];
+    if (!isBunjang) return [];
+    setCatOptionsLoading(true);
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'category:options', path });
+      if (resp?.ok && Array.isArray(resp.groups)) {
+        const next = { ...catOptionsCache, [key]: resp.groups };
+        setCatOptionsCache(next);
+        await categoryOptionsCache.set(path, resp.groups);
+        return resp.groups;
+      } else {
+        // 옵션이 없는 카테고리는 빈 배열로 캐시
+        const next = { ...catOptionsCache, [key]: [] };
+        setCatOptionsCache(next);
+        await categoryOptionsCache.set(path, []);
+        return [];
+      }
+    } catch (e) {
+      console.warn('[sidepanel] 옵션 가져오기 실패:', e);
+      return [];
+    } finally {
+      setCatOptionsLoading(false);
+    }
+  }
+
+  // 카테고리 경로 변경 헬퍼 — level까지 setting하고 그 뒤 레벨은 비움
+  function setCategoryLevel(level, value) {
+    const next = [...(product.categoryPath || [])];
+    while (next.length <= level) next.push('');
+    next[level] = value;
+    // 뒤쪽 레벨 초기화
+    next.length = level + 1;
+    while (next.length > 0 && !next[next.length - 1]) next.pop();
+    setProduct(p => ({ ...p, categoryPath: next, categoryOptions: {} }));
+    // 추가 옵션: CATEGORY_EXTRA_OPTIONS에 없으면 page-fetch 시도
+    if (value && next.length >= 2) {
+      const key = next.join('>');
+      if (!CATEGORY_EXTRA_OPTIONS[key]) {
+        // 소분류(level 2) 까지 선택된 경우에만 fetch
+        if (level === 2) fetchCategoryOptions(next);
+      }
+    }
+  }
+
+  // 현재 경로의 옵션 그룹 — CATEGORY_EXTRA_OPTIONS 우선, 없으면 page-fetch 캐시
+  const currentCatOptions = useMemoSP(() => {
+    const path = product.categoryPath || [];
+    if (path.length < 2) return [];
+    const key = path.join('>');
+    // 1. 하드코딩된 추가 옵션 (신발 사이즈 등) — 즉시 노출
+    if (CATEGORY_EXTRA_OPTIONS[key]) return CATEGORY_EXTRA_OPTIONS[key];
+    // 2. page-fetch 캐시 (소분류까지 선택된 경우만)
+    if (path.length >= 3 && path[2]) return catOptionsCache[key] || [];
+    return [];
+  }, [product.categoryPath, catOptionsCache]);
+
+  // 트리 헬퍼: level별 children 조회
+  function getLevelOptions(level) {
+    const path = product.categoryPath || [];
+    if (level === 0) return catTree.map(n => n.name);
+    if (level === 1) {
+      const l0 = catTree.find(n => n.name === path[0]);
+      return (l0?.children ?? []).map(n => n.name);
+    }
+    if (level === 2) {
+      const l0 = catTree.find(n => n.name === path[0]);
+      const l1 = l0?.children?.find(n => n.name === path[1]);
+      return (l1?.children ?? []).map(n => n.name);
+    }
+    return [];
+  }
+
+  // ── 이미지 추가 (파일 선택 또는 드래그&드롭) ──
+  const handleAddImages = useCallback(async (files) => {
+    if (!files || files.length === 0) return;
+    const remaining = Math.max(0, 3 - (product.imgs?.length || 0));
+    if (remaining === 0) {
+      showToast('이미지는 최대 3개까지 가능합니다');
+      return;
+    }
+    const accepted = Array.from(files)
+      .filter(f => f.type.startsWith('image/'))
+      .slice(0, remaining);
+    if (accepted.length === 0) {
+      showToast('이미지 파일만 추가 가능합니다');
+      return;
+    }
+    try {
+      const keys = await Promise.all(accepted.map(f => saveImage(f)));
+      setProduct(p => ({...p, imgs: [...(p.imgs || []), ...keys]}));
+      showToast(`이미지 ${keys.length}개 추가됨`);
+    } catch (e) {
+      showToast('이미지 저장 실패: ' + (e?.message || String(e)));
+    }
+  }, [product.imgs]);
+
+  const handleRemoveImage = useCallback(async (idx) => {
+    const key = product.imgs[idx];
+    setProduct(p => ({...p, imgs: p.imgs.filter((_, i) => i !== idx)}));
+    if (key && typeof key === 'string' && key.startsWith('img:')) {
+      try { await deleteImage(key); } catch (e) { console.warn('[sidepanel] deleteImage 실패:', e); }
+      setImgPreviews(prev => {
+        const next = {...prev};
+        delete next[key];
+        return next;
+      });
+    }
+  }, [product.imgs]);
+
+  function openFilePicker() {
+    fileInputRef.current?.click();
   }
 
   async function handleInject() {
-    if (injecting) return;
+    if (injecting || clearing) return;
     if (typeof chrome === 'undefined' || !chrome.runtime) {
       showToast('Chrome 확장 컨텍스트에서만 사용 가능');
       return;
@@ -586,13 +960,37 @@ function SidePanel({ tweaks }){
     }
   }
 
-  const AI = [
-    { key: 'seo', label: '최대 검색 노출', text: '아디다스 삼바 OG 클래식 블랙 화이트 270 US 9.5 정품 일본직구 스니커즈' },
-    { key: 'simple', label: '간결 직관', text: '아디다스 삼바 OG 블랙 270mm' },
-    { key: 'rare', label: '한정 · 희소성', text: '일본 한정 아디다스 삼바 OG 블랙 화이트 270 · 국내 소량' },
-    { key: 'cond', label: '상태 · 컨디션', text: '[S급] 아디다스 삼바 OG 정품 블랙 화이트 270 / 2회 착용' },
-    { key: 'jp', label: '일본어 병기', text: '아디다스 삼바 OG 블랙 270 サンバ 正規品' },
-  ];
+  // ── 새 상품 등록 — 현재 초안(이미지 포함) 전부 초기화 ──
+  async function handleRegisterNew() {
+    if (clearing || injecting) return;
+    setClearing(true);
+    try {
+      // IndexedDB 이미지 삭제
+      for (const k of (product.imgs || [])) {
+        if (typeof k === 'string' && k.startsWith('img:')) {
+          try { await deleteImage(k); } catch {}
+        }
+      }
+      // chrome.storage 초안 삭제
+      if (typeof chrome !== 'undefined' && chrome.storage) {
+        await draftStore.clear();
+      }
+      // 폼 상태 전체 초기화
+      setProduct({ title:'', cost:0, price:0, desc:'', imgs:[], tags:[], categoryPath:[], categoryOptions:{} });
+      setAiInputs({ brand:'', model:'', feature:'' });
+      setAiTitles(DEFAULT_AI_TITLES);
+      setAiSelected(null);
+      setAiDesc(null);
+      setImgPreviews({});
+      setDiagResults(null);
+      showToast('새 상품 등록 준비 완료 — 초안이 초기화됐습니다');
+    } catch (e) {
+      showToast('초기화 실패: ' + (e?.message || String(e)));
+    } finally {
+      setClearing(false);
+    }
+  }
+
   const TPL = [
     { name: '배송 안내', text: '📦 구매 확정 후 1~2일 내 출고됩니다.\nCJ대한통운 기준, 제주/도서산간 추가 3,000원.' },
     { name: '정품 보증', text: '✅ 100% 정품 보증. 일본 공식 스토어 매입건.' },
@@ -631,7 +1029,7 @@ function SidePanel({ tweaks }){
           <div className="sp-sub">번개장터</div>
         </div>
         <button className="sp-icon-btn" title="기록">{SPI.history()}</button>
-        <button className="sp-icon-btn" title="설정">{SPI.settings()}</button>
+        <button className="sp-icon-btn" title="설정" onClick={() => setSettingsOpen(true)}>{SPI.settings()}</button>
       </div>
 
       {/* Status strip — shows connected page */}
@@ -647,36 +1045,130 @@ function SidePanel({ tweaks }){
 
       {/* Persistent action bar (always visible) */}
       <div className="sp-actionbar">
-        <button className="sp-btn accent" style={{flex:1, opacity: injecting ? 0.7 : 1}} onClick={handleInject} disabled={injecting}>
-          {injecting ? <>{SPI.spin()} 주입 중…</> : <>{SPI.cart()} 번개장터 자동입력</>}
+        <button className="sp-btn primary" style={{flex:3, opacity: (injecting||clearing) ? 0.65 : 1}}
+          onClick={handleInject} disabled={injecting || clearing}
+          title="현재 열려있는 번개장터 상품등록 페이지에 자동입력">
+          {injecting ? <>{SPI.spin()} 입력 중…</> : <>{SPI.cart()} 번개장터 자동입력</>}
+        </button>
+        <button className="sp-btn" style={{flex:1, opacity: (injecting||clearing) ? 0.65 : 1}}
+          onClick={handleRegisterNew} disabled={injecting || clearing}
+          title="초안과 이미지를 초기화하고 새 상품 작성 시작">
+          {clearing ? <>{SPI.spin()}</> : <>+ 새 상품</>}
         </button>
       </div>
 
       <div className="sp-body">
+        {/* AI 상품정보 생성 — 한 번 누르면 모든 항목 채움 */}
+        <SPSection title="AI 상품정보 생성" meta={
+          <span className="sp-chip accent">
+            {SPI.sparkle()} Gemini {appSettings.model === 'pro' ? 'Pro' : 'Flash'}
+          </span>
+        }>
+          <div className="sp-row" style={{marginBottom:8, flexWrap:'wrap'}}>
+            <div className="sp-field" style={{marginBottom:0, minWidth: 100}}>
+              <label className="sp-label">브랜드 <span className="req">*</span></label>
+              <input className="sp-input" value={aiInputs.brand} placeholder="예: 아디다스"
+                onChange={e => setAiInputs(v => ({...v, brand: e.target.value}))}/>
+            </div>
+            <div className="sp-field" style={{marginBottom:0, minWidth: 100}}>
+              <label className="sp-label">모델 <span className="req">*</span></label>
+              <input className="sp-input" value={aiInputs.model} placeholder="예: 삼바 OG"
+                onChange={e => setAiInputs(v => ({...v, model: e.target.value}))}/>
+            </div>
+            <div className="sp-field" style={{marginBottom:0, minWidth: 100}}>
+              <label className="sp-label">특징</label>
+              <input className="sp-input" value={aiInputs.feature} placeholder="예: S급, 정품"
+                onChange={e => setAiInputs(v => ({...v, feature: e.target.value}))}/>
+            </div>
+          </div>
+          <button className="sp-btn primary block" style={{marginBottom: 10}}
+            onClick={handleGenerateAI} disabled={aiLoading}>
+            {aiLoading
+              ? <>{SPI.spin()} 생성 중…</>
+              : <>{SPI.sparkle()} AI로 모든 항목 채우기</>}
+          </button>
+          {/* 생성 후: 다른 스타일 상품명 카드 — 클릭 시 즉시 교체 */}
+          {aiTitles[0]?.key.startsWith('ai-') && (
+            <>
+              <div className="sp-hint" style={{marginBottom:6}}>
+                상품명 다른 스타일로 바꾸려면 카드 클릭
+              </div>
+              <div className="sp-ai-grid">
+                {aiTitles.map((r,i)=>(
+                  <div key={r.key} className={`sp-ai ${aiSelected===i?'selected':''}`}
+                    onClick={()=>{
+                      setAiSelected(i);
+                      setProduct(p => ({...p, title: r.text}));
+                      showToast('상품명 교체됨');
+                    }}>
+                    <div className="sp-ai-style"><span className="dot"/>{r.label}</div>
+                    <div className="sp-ai-title">{r.text}</div>
+                    <div className="sp-ai-len">{r.text.length}자</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </SPSection>
+
         {/* Images + Info — combined, side-panel has room */}
         <SPSection title="상품" meta="이미지 3/3 · 마진 흑자">
           <div style={{marginBottom: 10}}>
-            <label className="sp-label" style={{marginBottom: 6, display:'block'}}>이미지</label>
+            <label className="sp-label" style={{marginBottom: 6, display:'flex'}}>
+              이미지
+              <span style={{marginLeft:'auto', fontSize:10, color:'var(--ink-3)'}}>
+                클릭/드래그로 추가 (최대 3개)
+              </span>
+            </label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{display:'none'}}
+              onChange={(e) => {
+                handleAddImages(e.target.files);
+                e.target.value = ''; // 같은 파일 재선택 가능
+              }}
+            />
             <div className="sp-imgs">
-              {[0,1,2].map(i=>(
-                <div key={i} className={`sp-imgslot ${product.imgs[i]?'filled':''}`}>
-                  {product.imgs[i] ? (
-                    <>
-                      <div className="fill" style={{backgroundImage: 'url('+product.imgs[i]+')'}}/>
-                      <div className="idx">{i+1}</div>
-                      <button className="rm" onClick={()=>{
-                        const next=[...product.imgs]; next[i]=null;
-                        setProduct({...product, imgs: next});
-                      }}>×</button>
-                    </>
-                  ) : (
-                    <div style={{textAlign:'center'}}>
-                      {SPI.plus()}
-                      <div style={{marginTop:3, fontSize:10}}>{i+1}번</div>
-                    </div>
-                  )}
-                </div>
-              ))}
+              {[0,1,2].map(i=>{
+                const key = product.imgs?.[i];
+                const url = key ? imgPreviews[key] : null;
+                const isDrag = dragOverIdx === i;
+                return (
+                  <div key={i}
+                    className={`sp-imgslot ${key ? 'filled' : ''}`}
+                    style={isDrag ? {borderColor:'var(--accent)', background:'var(--accent-soft)'} : null}
+                    onClick={() => { if (!key) openFilePicker(); }}
+                    onDragOver={(e) => { e.preventDefault(); setDragOverIdx(i); }}
+                    onDragLeave={() => setDragOverIdx(null)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setDragOverIdx(null);
+                      if (e.dataTransfer?.files?.length) {
+                        handleAddImages(e.dataTransfer.files);
+                      }
+                    }}>
+                    {key ? (
+                      <>
+                        {url ? (
+                          <div className="fill" style={{backgroundImage: 'url('+url+')'}}/>
+                        ) : (
+                          <div style={{color:'var(--ink-3)', fontSize:10}}>로딩…</div>
+                        )}
+                        <div className="idx">{i+1}</div>
+                        <button className="rm" onClick={(e)=>{ e.stopPropagation(); handleRemoveImage(i); }}>×</button>
+                      </>
+                    ) : (
+                      <div style={{textAlign:'center'}}>
+                        {SPI.plus()}
+                        <div style={{marginTop:3, fontSize:10}}>{i+1}번</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
           <div className="sp-field">
@@ -739,6 +1231,68 @@ function SidePanel({ tweaks }){
             )}
           </div>
 
+          {/* 카테고리 — 하드코딩 트리 기반 cascading dropdown */}
+          <div className="sp-field">
+            <label className="sp-label">카테고리</label>
+
+            <div className="sp-row">
+              {[0,1,2].map(i => {
+                const opts = getLevelOptions(i);
+                const value = product.categoryPath?.[i] || '';
+                const disabled = i > 0 && !product.categoryPath?.[i-1];
+                return (
+                  <select key={i} className="sp-input"
+                    value={value}
+                    disabled={disabled}
+                    onChange={e => setCategoryLevel(i, e.target.value)}
+                    style={{cursor: !disabled && opts.length > 0 ? 'pointer' : 'not-allowed'}}>
+                    <option value="">{['대분류','중분류','소분류'][i]}</option>
+                    {opts.map(name => (
+                      <option key={name} value={name}>{name}</option>
+                    ))}
+                  </select>
+                );
+              })}
+            </div>
+
+            {catOptionsLoading && (
+              <div style={{fontSize:10, color:'var(--ink-3)', marginTop:4}}>
+                추가 옵션 확인 중…
+              </div>
+            )}
+
+            {/* 추가 옵션 (사이즈 등) — 소분류 선택 시 자동 노출 */}
+            {currentCatOptions.length > 0 && (
+              <div style={{marginTop:8, padding:8,
+                          background:'var(--surface-2)', borderRadius:6,
+                          border:'1px solid var(--line)'}}>
+                <div style={{fontSize:10, color:'var(--ink-3)', marginBottom:6}}>
+                  추가 옵션
+                </div>
+                <div style={{display:'flex', flexDirection:'column', gap:6}}>
+                  {currentCatOptions.map(group => (
+                    <div key={group.name} style={{display:'flex', gap:6, alignItems:'center'}}>
+                      <span style={{fontSize:11, minWidth:50, color:'var(--ink-2)'}}>
+                        {group.name}
+                      </span>
+                      <select className="sp-input" style={{flex:1}}
+                        value={(product.categoryOptions || {})[group.name] || ''}
+                        onChange={e => setProduct(p => ({
+                          ...p,
+                          categoryOptions: { ...(p.categoryOptions || {}), [group.name]: e.target.value },
+                        }))}>
+                        <option value="">선택</option>
+                        {group.options.map(opt => (
+                          <option key={opt} value={opt}>{opt}</option>
+                        ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* 상품 상태 — 번개장터 실제 값과 동일 */}
           <div className="sp-field">
             <label className="sp-label">상품 상태</label>
@@ -770,8 +1324,8 @@ function SidePanel({ tweaks }){
         }>
           <div className="sp-margin">
             <div className="sp-margin-row"><span>원가 (환산 {fx}원/엔)</span><span className="v">{Math.round(margin.cost).toLocaleString()}원</span></div>
-            <div className="sp-margin-row"><span>배송비</span><span className="v">3,500원</span></div>
-            <div className="sp-margin-row"><span>플랫폼 수수료 (3%)</span><span className="v">{Math.round(margin.fee).toLocaleString()}원</span></div>
+            <div className="sp-margin-row"><span>배송비</span><span className="v">{shipping.toLocaleString()}원</span></div>
+            <div className="sp-margin-row"><span>플랫폼 수수료 ({(feeRate*100).toFixed(1)}%)</span><span className="v">{Math.round(margin.fee).toLocaleString()}원</span></div>
             <div className="sp-margin-total">
               <span style={{fontSize:12, color:'var(--ink-2)', fontWeight:500}}>예상 수익</span>
               <span>
@@ -782,79 +1336,6 @@ function SidePanel({ tweaks }){
               </span>
             </div>
           </div>
-        </SPSection>
-
-        {/* AI titles */}
-        <SPSection title="AI 상품명 + 설명 생성" meta={<span className="sp-chip accent">{SPI.sparkle()} Gemini Flash</span>}>
-          <div className="sp-row" style={{marginBottom:8, flexWrap:'wrap'}}>
-            <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
-              <label className="sp-label">브랜드</label>
-              <input className="sp-input" value={aiInputs.brand}
-                onChange={e => setAiInputs(v => ({...v, brand: e.target.value}))}/>
-            </div>
-            <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
-              <label className="sp-label">모델</label>
-              <input className="sp-input" value={aiInputs.model}
-                onChange={e => setAiInputs(v => ({...v, model: e.target.value}))}/>
-            </div>
-            <div className="sp-field" style={{marginBottom:0, minWidth: 120}}>
-              <label className="sp-label">특징</label>
-              <input className="sp-input" value={aiInputs.feature}
-                onChange={e => setAiInputs(v => ({...v, feature: e.target.value}))}/>
-            </div>
-          </div>
-          <button className="sp-btn primary block" style={{marginBottom: 10}}
-            onClick={()=>{
-              setAiLoading(true); setAiSelected(null); setAiDesc(null);
-              // TODO Phase 2: Gemini API 실 호출로 교체
-              setTimeout(()=>{
-                setAiLoading(false);
-                // mock 설명 생성
-                const { brand, model, feature } = aiInputs;
-                setAiDesc(
-                  `일본 직구 정품 ${brand} ${model}입니다.\n` +
-                  `${feature ? feature + '.\n' : ''}` +
-                  `박스 및 부속품 포함되어 있으며 꼼꼼하게 포장해서 발송합니다.\n` +
-                  `사이즈·컨디션 사진 추가 요청 주시면 채팅으로 보내드립니다.`
-                );
-              }, 800);
-            }}>
-            {aiLoading ? <>{SPI.spin()} 생성 중…</> : <>{SPI.sparkle()} 상품명 + 설명 생성</>}
-          </button>
-          <div className="sp-ai-grid">
-            {AI.map((r,i)=>(
-              <div key={r.key} className={`sp-ai ${aiSelected===i?'selected':''}`} onClick={()=>setAiSelected(i)}>
-                <div className="sp-ai-style"><span className="dot"/>{r.label}</div>
-                <div className="sp-ai-title">{r.text}</div>
-                <div className="sp-ai-len">{r.text.length}자</div>
-              </div>
-            ))}
-          </div>
-          {aiSelected != null && (
-            <button className="sp-btn primary block" style={{marginTop:10}}
-              onClick={()=>{ setProduct({...product, title: AI[aiSelected].text}); showToast('상품명 적용됨'); }}>
-              {SPI.check()} 선택한 상품명 적용
-            </button>
-          )}
-
-          {/* AI 생성 설명 미리보기 + 적용 */}
-          {aiDesc != null && (
-            <div style={{marginTop:12}}>
-              <div className="sp-label" style={{marginBottom:5}}>
-                AI 생성 설명
-                <span style={{marginLeft:'auto', fontSize:10, color:'var(--ink-3)'}}>
-                  템플릿은 설명 섹션에서 추가
-                </span>
-              </div>
-              <textarea className="sp-textarea" style={{minHeight:90, fontSize:12}}
-                value={aiDesc}
-                onChange={e => setAiDesc(e.target.value)}/>
-              <button className="sp-btn primary block" style={{marginTop:6}}
-                onClick={()=>{ setProduct({...product, desc: aiDesc}); showToast('설명 적용됨'); }}>
-                {SPI.check()} 설명 적용
-              </button>
-            </div>
-          )}
         </SPSection>
 
         {/* Templates */}
@@ -921,6 +1402,139 @@ function SidePanel({ tweaks }){
           </div>
         </SPSection>
       </div>
+
+      {/* Settings Modal */}
+      {settingsOpen && (
+        <div
+          onClick={() => setSettingsOpen(false)}
+          style={{
+            position:'absolute', inset:0, background:'rgba(0,0,0,.45)',
+            zIndex: 100, display:'flex', alignItems:'center', justifyContent:'center',
+            padding: 16,
+          }}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background:'var(--bg)', borderRadius:12, width:'100%', maxWidth:400,
+              maxHeight:'90vh', overflowY:'auto', boxShadow:'0 20px 60px rgba(0,0,0,.4)',
+            }}>
+            <div style={{
+              display:'flex', alignItems:'center', padding:'14px 16px',
+              borderBottom:'1px solid var(--line)',
+            }}>
+              <div style={{flex:1, fontSize:14, fontWeight:600}}>설정</div>
+              <button className="sp-icon-btn" onClick={() => setSettingsOpen(false)}>{SPI.x()}</button>
+            </div>
+            <div style={{padding:16}}>
+              {/* Gemini */}
+              <div style={{fontSize:11, fontWeight:700, color:'var(--ink-2)', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:8}}>
+                AI · Gemini
+              </div>
+              <div className="sp-field">
+                <label className="sp-label">
+                  API 키 <span className="req">*</span>
+                  <span style={{marginLeft:'auto', fontSize:10, color:'var(--ink-3)'}}>
+                    Google AI Studio에서 발급
+                  </span>
+                </label>
+                <input
+                  className="sp-input"
+                  type="password"
+                  placeholder="AIza..."
+                  value={appSettings.apiKey || ''}
+                  onChange={(e) => setAppSettings(s => ({...s, apiKey: e.target.value}))}
+                />
+                <div className="sp-hint" style={{marginTop:4}}>
+                  키는 chrome.storage.local에 저장됩니다 (브라우저 외부 전송 없음)
+                </div>
+              </div>
+              <div className="sp-field">
+                <label className="sp-label">모델</label>
+                <div style={{display:'flex', gap:5}}>
+                  {[
+                    ['flash', 'Flash', 'gemini-2.5-flash · 빠름'],
+                    ['pro',   'Pro',   'gemini-2.5-pro · 고품질'],
+                  ].map(([value, label, desc]) => (
+                    <button key={value}
+                      className={`sp-btn sm ${appSettings.model === value ? 'primary' : ''}`}
+                      style={{flex:1, flexDirection:'column', padding:'8px 6px', height:'auto'}}
+                      title={desc}
+                      onClick={() => setAppSettings(s => ({...s, model: value}))}>
+                      <div style={{fontWeight:600}}>{label}</div>
+                      <div style={{fontSize:9.5, opacity:.7, marginTop:2}}>{desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 마진 계산 */}
+              <div style={{fontSize:11, fontWeight:700, color:'var(--ink-2)', textTransform:'uppercase', letterSpacing:'0.08em', marginTop:18, marginBottom:8}}>
+                마진 계산
+              </div>
+              <div className="sp-row">
+                <div className="sp-field">
+                  <label className="sp-label">환율 (원/엔)</label>
+                  <div className="sp-num">
+                    <input type="number" step="0.1"
+                      value={appSettings.fxRate}
+                      onChange={(e) => setAppSettings(s => ({...s, fxRate: +e.target.value || 0}))}/>
+                    <span className="unit">원/¥</span>
+                  </div>
+                </div>
+                <div className="sp-field">
+                  <label className="sp-label">배송비</label>
+                  <div className="sp-num">
+                    <input type="number"
+                      value={appSettings.shipping}
+                      onChange={(e) => setAppSettings(s => ({...s, shipping: +e.target.value || 0}))}/>
+                    <span className="unit">원</span>
+                  </div>
+                </div>
+                <div className="sp-field">
+                  <label className="sp-label">수수료</label>
+                  <div className="sp-num">
+                    <input type="number" step="0.01"
+                      value={appSettings.feeRate}
+                      onChange={(e) => setAppSettings(s => ({...s, feeRate: +e.target.value || 0}))}/>
+                    <span className="unit">비율</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* 초안 */}
+              <div style={{fontSize:11, fontWeight:700, color:'var(--ink-2)', textTransform:'uppercase', letterSpacing:'0.08em', marginTop:18, marginBottom:8}}>
+                초안 관리
+              </div>
+              <button className="sp-btn block"
+                onClick={async () => {
+                  if (typeof chrome !== 'undefined' && chrome.storage) {
+                    // 이미지 IndexedDB도 함께 비움
+                    for (const k of (product.imgs || [])) {
+                      if (typeof k === 'string' && k.startsWith('img:')) {
+                        try { await deleteImage(k); } catch {}
+                      }
+                    }
+                    await draftStore.clear();
+                  }
+                  setProduct({ title:'', cost:0, price:0, desc:'', imgs:[], tags:[] });
+                  setAiSelected(null);
+                  setAiDesc(null);
+                  setImgPreviews({});
+                  showToast('초안 삭제됨');
+                  setSettingsOpen(false);
+                }}>
+                현재 초안 + 이미지 삭제
+              </button>
+
+              <div style={{display:'flex', justifyContent:'flex-end', marginTop:18}}>
+                <button className="sp-btn primary" onClick={() => { setSettingsOpen(false); showToast('설정 저장됨'); }}>
+                  완료
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && <div className="sp-toast">{SPI.check()}{toast}</div>}
     </div>

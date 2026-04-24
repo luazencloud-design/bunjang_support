@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      idb-keyval:
+        specifier: ^6.2.1
+        version: 6.2.2
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -608,6 +611,9 @@ packages:
   he@1.2.0:
     resolution: {integrity: sha512-F/1DnUGPopORZi0ni+CvrCgHQ5FyEAHRLSApuYWMmrbSwoN2Mn/7k+Gl38gJnR7yyDZk6WLXwiGod1JOWNDKGw==}
     hasBin: true
+
+  idb-keyval@6.2.2:
+    resolution: {integrity: sha512-yjD9nARJ/jb1g+CvD0tlhUHOrJ9Sy0P8T9MF3YaLlHnSRpwPfpTX0XIvpmw3gAJUmEu3FiICLBDPXVwyEvrleg==}
 
   is-extglob@2.1.1:
     resolution: {integrity: sha512-SbKbANkN603Vi4jEZv49LeVJMn4yGwsbzZworEoyEiutsN3nJYdbO36zfhGJ6QEDpOZIFkDtnq5JRxmvl3jsoQ==}
@@ -1304,6 +1310,8 @@ snapshots:
   graceful-fs@4.2.11: {}
 
   he@1.2.0: {}
+
+  idb-keyval@6.2.2: {}
 
   is-extglob@2.1.1: {}
 

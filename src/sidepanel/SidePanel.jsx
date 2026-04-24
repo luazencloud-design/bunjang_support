@@ -608,7 +608,14 @@ function SidePanel({ tweaks }){
 
       {/* Header */}
       <div className="sp-top">
-        <div className="sp-logo">
+        <div className="sp-logo" title="번개장터 홈으로" style={{cursor:'pointer'}}
+          onClick={() => {
+            if (typeof chrome !== 'undefined' && chrome.tabs) {
+              chrome.tabs.create({ url: 'https://m.bunjang.co.kr/' });
+            } else {
+              window.open('https://m.bunjang.co.kr/', '_blank');
+            }
+          }}>
           {/* 번개 아이콘 */}
           <svg width="13" height="15" viewBox="0 0 13 15" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path
@@ -620,7 +627,7 @@ function SidePanel({ tweaks }){
           </svg>
         </div>
         <div style={{lineHeight: 1.2, flex: 1}}>
-          <div className="sp-title">등록 도우미</div>
+          <div className="sp-title">번개장터 등록 도우미</div>
           <div className="sp-sub">번개장터</div>
         </div>
         <button className="sp-icon-btn" title="기록">{SPI.history()}</button>

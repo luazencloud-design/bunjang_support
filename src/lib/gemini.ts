@@ -32,9 +32,11 @@ export type GeminiModel = 'flash' | 'pro';
 // 내부 상수
 // ────────────────────────────────────────────────────────────────────
 
+// 신규 사용자에게 gemini-2.0-flash / gemini-1.5-pro 는 더 이상 제공 안 됨 (2025년 정책)
+// 2.5 시리즈로 통일
 const MODEL_MAP: Record<GeminiModel, string> = {
-  flash: 'gemini-2.0-flash',
-  pro:   'gemini-1.5-pro',
+  flash: 'gemini-2.5-flash',
+  pro:   'gemini-2.5-pro',
 };
 
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';

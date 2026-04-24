@@ -1238,8 +1238,8 @@ function SidePanel({ tweaks }){
                 <label className="sp-label">모델</label>
                 <div style={{display:'flex', gap:5}}>
                   {[
-                    ['flash', 'Flash', 'gemini-2.0-flash · 빠름'],
-                    ['pro',   'Pro',   'gemini-1.5-pro · 고품질'],
+                    ['flash', 'Flash', 'gemini-2.5-flash · 빠름'],
+                    ['pro',   'Pro',   'gemini-2.5-pro · 고품질'],
                   ].map(([value, label, desc]) => (
                     <button key={value}
                       className={`sp-btn sm ${appSettings.model === value ? 'primary' : ''}`}

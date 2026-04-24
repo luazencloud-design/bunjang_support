@@ -469,6 +469,15 @@ const sidepanelCss = `
   .sp-live-dot {
     animation: sp-live-pulse 2.4s ease-in-out infinite !important;
   }
+
+  /* Spinner — rotation */
+  @keyframes sp-spin {
+    to { transform: rotate(360deg); }
+  }
+  .sp-spin-icon {
+    animation: sp-spin 0.7s linear infinite;
+    transform-origin: 50% 50%;
+  }
 `;
 
 // Reuse Icon from popup.jsx (it's on window via script order)
@@ -483,7 +492,7 @@ const SPI = {
   carrot: () => (<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M11 3.5L9.5 2L2.5 9L4 13.5L8 12L13.5 6.5L11 3.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>),
   settings: () => (<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.3"/><path d="M8 1.5V3M8 13V14.5M1.5 8H3M13 8H14.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>),
   history: () => (<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 8a6 6 0 1 0 1.8-4.3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/><path d="M2 2v3h3M8 5v3l2 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>),
-  spin: () => (<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" opacity="0.25"/><path d="M10.5 6A4.5 4.5 0 0 0 6 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>),
+  spin: () => (<svg className="sp-spin-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" style={{display:'inline-block', verticalAlign:'middle'}}><circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" opacity="0.25"/><path d="M10.5 6A4.5 4.5 0 0 0 6 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>),
 };
 
 function stripedSP(seed){

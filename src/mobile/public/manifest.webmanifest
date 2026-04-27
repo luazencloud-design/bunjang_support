@@ -1,0 +1,35 @@
+{
+  "name": "번개장터 스캐너",
+  "short_name": "번장스캐너",
+  "description": "일본 매장 현장에서 바코드 스캔 → 메루카리 시세 조회 → 마진 계산",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fbfaf7",
+  "theme_color": "#151515",
+  "icons": [
+    {
+      "src": "./icons/icon-svg.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["shopping", "utilities", "productivity"],
+  "shortcuts": [
+    {
+      "name": "바코드 스캔",
+      "short_name": "스캔",
+      "description": "카메라 켜고 바로 스캔 시작",
+      "url": "./?tab=scan"
+    },
+    {
+      "name": "마진 계산",
+      "short_name": "마진",
+      "description": "원가/판매가 입력해서 수익 계산",
+      "url": "./?tab=margin"
+    }
+  ]
+}

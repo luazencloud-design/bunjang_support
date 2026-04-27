@@ -5,7 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="번장스캐너" />
+  <meta name="theme-color" content="#151515" />
+  <meta name="description" content="일본 매장 현장에서 바코드 스캔 → 메루카리 시세 조회 → 마진 계산" />
+
   <title>번개장터 모바일 스캐너</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="./icons/icon-svg.svg" />
+  <link rel="apple-touch-icon" href="./icons/icon-svg.svg" />
+
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
@@ -22,5 +32,15 @@
 <body>
   <div id="root"></div>
   <script type="module" src="./main.tsx"></script>
+  <script>
+    // Service Worker 등록 — 오프라인 지원 + 홈 화면 추가 가능
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch((e) =>
+          console.warn('[PWA] SW 등록 실패:', e),
+        );
+      });
+    }
+  </script>
 </body>
 </html>

@@ -10,12 +10,14 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { BarcodeScanner } from '../lib/scanner';
 import { fetchFxRatesIfStale, fetchFxRates } from '../lib/fx';
-import { buildMercariSearchUrl, buildMercariBarcodeUrl, isValidJan } from '../lib/mercari';
+import { isValidJan } from '../lib/mercari';
+import { SITES, SITE_PRESETS, openSearchTab } from '../lib/search';
 
 // ─── localStorage key ──────────────────────────────────────────────
-const LS_KEY_HISTORY  = 'bunjang-mobile:history';
-const LS_KEY_SETTINGS = 'bunjang-mobile:settings';
-const LS_KEY_FXMETA   = 'bunjang-mobile:fxMeta';
+const LS_KEY_HISTORY    = 'bunjang-mobile:history';
+const LS_KEY_SETTINGS   = 'bunjang-mobile:settings';
+const LS_KEY_FXMETA     = 'bunjang-mobile:fxMeta';
+const LS_KEY_LAST_QUERY = 'bunjang-mobile:lastQuery'; // 마지막 편집된 검색어 캐시
 
 // ─── 기본 설정 ────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = {
@@ -358,6 +360,11 @@ function MobilePWA({ tweaks }){
   // 이력 (localStorage)
   const [history, setHistory] = useState(() => loadJson(LS_KEY_HISTORY, []));
 
+  // 검색어 — 바코드로 초기화되지만 사용자가 일본어/한글 상품명으로 편집 가능
+  // 빈 입력 + 캐시된 마지막 검색어 → 다음 스캔 시 참고용으로 placeholder
+  const [searchQuery, setSearchQuery] = useState('');
+  const lastSavedQuery = useMemo(() => loadJson(LS_KEY_LAST_QUERY, ''), []);
+
   const [toast, setToast] = useState(null);
   function showToast(msg) {
     setToast(msg);
@@ -414,6 +421,8 @@ function MobilePWA({ tweaks }){
         await scanner.start((result) => {
           if (!alive) return;
           setScanned({ code: result.text, format: result.format, ts: result.timestamp });
+          // 검색어 input도 바코드로 초기화 (사용자가 편집하기 전 시작값)
+          setSearchQuery(result.text);
           showToast(`바코드 인식: ${result.text}`);
           // navigator.vibrate (지원 브라우저만)
           if (navigator.vibrate) navigator.vibrate(60);
@@ -486,12 +495,15 @@ function MobilePWA({ tweaks }){
     }
   }
 
-  function openMercariSearch() {
-    if (!scanned) return;
-    const url = isValidJan(scanned.code)
-      ? buildMercariBarcodeUrl(scanned.code)
-      : buildMercariSearchUrl(scanned.code);
-    window.open(url, '_blank', 'noopener');
+  function handleSiteSearch(siteCode) {
+    const q = (searchQuery || scanned?.code || '').trim();
+    if (!q) {
+      showToast('검색어가 비어있습니다');
+      return;
+    }
+    // 마지막 검색어 캐싱 (바코드와 다른 경우만 — 사용자가 직접 편집한 경우)
+    if (q !== scanned?.code) saveJson(LS_KEY_LAST_QUERY, q);
+    openSearchTab(siteCode, q);
   }
 
   function jumpToMargin() {
@@ -620,16 +632,93 @@ function MobilePWA({ tweaks }){
                     </div>
                   </div>
                 </div>
-                <div className="m-action-row">
-                  <button className="m-btn" onClick={openMercariSearch}>
-                    <MIcon.merc/> 메루카리 시세
-                  </button>
+
+                {/* 검색어 input — 바코드는 메루카리에서 거의 안 잡히므로 사용자가 상품명으로 편집 */}
+                <div style={{marginBottom:10}}>
+                  <label style={{fontSize:11, fontWeight:500, color:'var(--ink-2)', display:'block', marginBottom:4}}>
+                    검색어 <span style={{color:'var(--ink-3)', fontWeight:400}}>(편집 가능 — 일본어/한글로 바꾸면 정확도 ↑)</span>
+                  </label>
+                  <div className="m-num" style={{padding:'2px 12px'}}>
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={e => setSearchQuery(e.target.value)}
+                      placeholder={scanned.code}
+                      style={{
+                        flex:1, border:'none', outline:'none', background:'transparent',
+                        padding:'10px 0', fontSize:14, color:'var(--ink)',
+                        minWidth:0,
+                      }}
+                    />
+                    {searchQuery && searchQuery !== scanned.code && (
+                      <button
+                        onClick={() => setSearchQuery(scanned.code)}
+                        title="바코드로 되돌리기"
+                        style={{border:'none', background:'transparent', color:'var(--ink-3)', cursor:'pointer', fontSize:11, padding:'4px 6px'}}>
+                        ↺
+                      </button>
+                    )}
+                  </div>
+                  {lastSavedQuery && lastSavedQuery !== scanned.code && searchQuery === scanned.code && (
+                    <button
+                      onClick={() => setSearchQuery(lastSavedQuery)}
+                      style={{
+                        marginTop:4, fontSize:10.5, color:'var(--accent)',
+                        border:'none', background:'transparent', cursor:'pointer', padding:'2px 4px',
+                      }}>
+                      ↶ 마지막 검색어 "{lastSavedQuery.slice(0,20)}{lastSavedQuery.length>20?'…':''}" 사용
+                    </button>
+                  )}
+                </div>
+
+                {/* 멀티 사이트 검색 버튼 — 한국 매입 워크플로 우선 */}
+                <div style={{display:'grid', gridTemplateColumns:'repeat(2, 1fr)', gap:6, marginBottom:10}}>
+                  {SITE_PRESETS['sourcing-kr'].map(siteCode => {
+                    const meta = SITES[siteCode];
+                    return (
+                      <button
+                        key={siteCode}
+                        className="m-btn"
+                        onClick={() => handleSiteSearch(siteCode)}
+                        title={meta.hint}
+                        style={{padding:'12px 10px', fontSize:13, justifyContent:'flex-start', gap:6}}>
+                        <span style={{fontSize:15}}>{meta.emoji}</span>
+                        <span>{meta.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* 보조 — 일본어 상품명 확인용 (저빈도) */}
+                <details style={{marginBottom:10}}>
+                  <summary style={{fontSize:11, color:'var(--ink-3)', cursor:'pointer', padding:'4px 0'}}>
+                    더 많은 검색 (아마존JP / 요도바시 / 구글)
+                  </summary>
+                  <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:6, marginTop:6}}>
+                    {['amazonJp', 'yodobashi', 'google'].map(siteCode => {
+                      const meta = SITES[siteCode];
+                      return (
+                        <button
+                          key={siteCode}
+                          className="m-btn"
+                          onClick={() => handleSiteSearch(siteCode)}
+                          title={meta.hint}
+                          style={{padding:'10px 6px', fontSize:11, gap:4}}>
+                          <span>{meta.emoji}</span>
+                          <span>{meta.short}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </details>
+
+                <div className="m-action-row" style={{marginBottom:0}}>
                   <button className="m-btn primary" onClick={jumpToMargin}>
                     ₩ 마진 계산
                   </button>
                 </div>
-                <button className="m-btn" style={{fontSize:12, padding:'10px 12px', background:'transparent', color:'var(--ink-3)'}}
-                  onClick={() => setScanned(null)}>
+                <button className="m-btn" style={{fontSize:12, padding:'10px 12px', background:'transparent', color:'var(--ink-3)', marginTop:8}}
+                  onClick={() => { setScanned(null); setSearchQuery(''); }}>
                   스캔 결과 지우기
                 </button>
               </div>

@@ -33,6 +33,8 @@ const DEFAULT_AI_SETTINGS = {
   dark: false,
   accent: '#151515',
   autoScan: true,
+  lastCostCurrency: 'KRW',  // sticky — 다음 상품 기본 통화
+  lastPriceCurrency: 'KRW',
 };
 
 // ── 통화 (USD/JPY/KRW) ─────────────────────────────────────────
@@ -559,7 +561,7 @@ function SidePanel({ tweaks }){
   const [product, setProduct] = useStateSP({
     title: '',
     cost: 0,
-    costCurrency: 'JPY',  // 'JPY' | 'USD' | 'KRW' — 원가 단위 (기본 일본 직구)
+    costCurrency: 'KRW',  // 'JPY' | 'USD' | 'KRW' — 마운트 후 settings.lastCostCurrency로 동기화
     price: 0,
     priceCurrency: 'KRW', // 판매가 단위 — 기본 번개장터 등록가(원)
     desc: '',
@@ -658,6 +660,13 @@ function SidePanel({ tweaks }){
               tags: Array.isArray(savedDraft.tags) ? savedDraft.tags : [],
               categoryOptions: (savedDraft.categoryOptions && typeof savedDraft.categoryOptions === 'object')
                 ? savedDraft.categoryOptions : {},
+            }));
+          } else if (savedSettings?.lastCostCurrency || savedSettings?.lastPriceCurrency) {
+            // draft가 비어 있으면 sticky 통화로 시작
+            setProduct(p => ({
+              ...p,
+              costCurrency: savedSettings.lastCostCurrency ?? p.costCurrency,
+              priceCurrency: savedSettings.lastPriceCurrency ?? p.priceCurrency,
             }));
           }
           if (savedSettings) {
@@ -1137,8 +1146,13 @@ function SidePanel({ tweaks }){
       if (typeof chrome !== 'undefined' && chrome.storage) {
         await draftStore.clear();
       }
-      // 폼 상태 전체 초기화
-      setProduct({ title:'', cost:0, price:0, desc:'', imgs:[], tags:[], categoryPath:[], categoryOptions:{} });
+      // 폼 상태 전체 초기화 (통화는 sticky 적용 — 다음 상품도 같은 통화로 시작)
+      setProduct({
+        title:'', cost:0, price:0, desc:'', imgs:[], tags:[],
+        categoryPath:[], categoryOptions:{},
+        costCurrency: appSettings.lastCostCurrency ?? 'KRW',
+        priceCurrency: appSettings.lastPriceCurrency ?? 'KRW',
+      });
       setAiInputs({ brand:'', model:'', feature:'' });
       setAiTitles(DEFAULT_AI_TITLES);
       setAiSelected(null);
@@ -1370,8 +1384,13 @@ function SidePanel({ tweaks }){
                   }}
                 />
                 <select className="sp-cur"
-                  value={product.costCurrency ?? 'JPY'}
-                  onChange={e => setProduct({ ...product, costCurrency: e.target.value })}>
+                  value={product.costCurrency ?? 'KRW'}
+                  onChange={e => {
+                    const v = e.target.value;
+                    setProduct({ ...product, costCurrency: v });
+                    // sticky — 다음 상품 디폴트로 사용
+                    setAppSettings(s => ({ ...s, lastCostCurrency: v }));
+                  }}>
                   {CURRENCIES.map(c => (
                     <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>
                   ))}
@@ -1396,7 +1415,11 @@ function SidePanel({ tweaks }){
                 />
                 <select className="sp-cur"
                   value={product.priceCurrency ?? 'KRW'}
-                  onChange={e => setProduct({ ...product, priceCurrency: e.target.value })}>
+                  onChange={e => {
+                    const v = e.target.value;
+                    setProduct({ ...product, priceCurrency: v });
+                    setAppSettings(s => ({ ...s, lastPriceCurrency: v }));
+                  }}>
                   {CURRENCIES.map(c => (
                     <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>
                   ))}
@@ -1587,6 +1610,20 @@ function SidePanel({ tweaks }){
                 <span className="pct">{margin.pct>=0?'+':''}{margin.pct.toFixed(1)}%</span>
               </span>
             </div>
+            {/* 메루카리 노출가 참고 — 판매가가 KRW일 때 일본 buyer 시점 환산 */}
+            {(product.priceCurrency ?? 'KRW') === 'KRW' && margin.price > 0 && (
+              <div style={{
+                fontSize:10.5, color:'var(--ink-3)', marginTop:8,
+                paddingTop:6, borderTop:'1px dashed var(--line-2)',
+                display:'flex', justifyContent:'space-between', alignItems:'center',
+              }}
+                title="번개장터 메루카리 연동 시 일본 buyer가 보게 될 환산가 (참고용)">
+                <span>🇯🇵 메루카리 노출가 (참고)</span>
+                <span style={{fontFamily:'JetBrains Mono, monospace', fontWeight:600, color:'var(--ink-2)'}}>
+                  ≈ ¥{Math.round(margin.price / fxJpy).toLocaleString()}
+                </span>
+              </div>
+            )}
             {/* FX 자동 갱신 상태 + 수동 새로고침 */}
             <div style={{
               display:'flex', justifyContent:'space-between', alignItems:'center',

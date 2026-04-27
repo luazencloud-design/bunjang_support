@@ -3,11 +3,16 @@
 // ────────────────────────────────────────────────────────────────────
 // 상품
 // ────────────────────────────────────────────────────────────────────
+// 가격 단위 — 원가/판매가에 각각 독립 적용
+export type Currency = 'JPY' | 'USD' | 'KRW';
+
 export interface Product {
   id: string;                     // Date.now().toString() 또는 ulid
   title: string;
-  cost: number;                   // 원가 (엔)
-  price: number;                  // 판매가 (원)
+  cost: number;                   // 원가 (단위는 costCurrency)
+  costCurrency?: Currency;        // 원가 단위 — 기본 JPY (일본 직구 가정)
+  price: number;                  // 판매가 (단위는 priceCurrency)
+  priceCurrency?: Currency;       // 판매가 단위 — 기본 KRW (번개장터 등록가)
   desc: string;                   // 상품 설명
   imgs: string[];                 // IndexedDB 키 목록 (base64 직접 저장 금지)
   brand?: string;
@@ -43,7 +48,9 @@ export interface Template {
 export interface Settings {
   apiKey?: string;                // Gemini API 키 (사용자 본인, Google AI Studio에서 발급)
   model: 'flash' | 'pro';        // gemini-2.0-flash | gemini-1.5-pro
-  fxRate: number;                 // 환율 (기본 9.3)
+  fxRate: number;                 // [legacy] JPY→KRW 환율 (호환용 — fxRateJpy로 마이그레이션)
+  fxRateJpy: number;              // 엔 → 원 환율 (기본 9.3)
+  fxRateUsd: number;              // 달러 → 원 환율 (기본 1380)
   shipping: number;               // 배송비 (기본 3500)
   feeRate: number;                // 수수료율 (기본 0.06)
   dark: boolean;
@@ -53,12 +60,32 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   model: 'flash',
-  fxRate: 9.3,
+  fxRate: 9.3,        // legacy
+  fxRateJpy: 9.3,
+  fxRateUsd: 1380,
   shipping: 3500,
   feeRate: 0.06,
   dark: false,
   accent: '#151515',
   autoScan: true,
+};
+
+// 통화 → KRW 환산 단가
+export function toKrw(amount: number, currency: Currency, settings: Pick<Settings, 'fxRateJpy' | 'fxRateUsd'>): number {
+  if (!amount) return 0;
+  switch (currency) {
+    case 'KRW': return amount;
+    case 'JPY': return amount * (settings.fxRateJpy || 9.3);
+    case 'USD': return amount * (settings.fxRateUsd || 1380);
+    default: return amount;
+  }
+}
+
+// 통화 기호
+export const CURRENCY_SYMBOL: Record<Currency, string> = {
+  JPY: '¥',
+  USD: '$',
+  KRW: '₩',
 };
 
 // ────────────────────────────────────────────────────────────────────
@@ -101,8 +128,16 @@ export interface CategoryOptionGroup {
 // ────────────────────────────────────────────────────────────────────
 // 컨텍스트 간 메시지 타입
 // ────────────────────────────────────────────────────────────────────
+// 이미지 데이터 — sidepanel(extension origin)에서 IndexedDB로 로드한 후
+// content script(bunjang.co.kr origin)로 전달용. base64 dataURL 사용.
+export interface InjectImageData {
+  name: string;
+  type: string;   // MIME (예: 'image/jpeg')
+  data: string;   // base64 dataURL (예: 'data:image/jpeg;base64,...')
+}
+
 export type ExtMessage =
-  | { type: 'inject';            product: Product }
+  | { type: 'inject';            product: Product; imageData?: InjectImageData[] }
   | { type: 'inject:result';     results: InjectResult[] }
   | { type: 'tab:url';           url: string; isBunjang: boolean }
   | { type: 'category:tree' }

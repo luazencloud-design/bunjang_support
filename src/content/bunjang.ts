@@ -142,7 +142,7 @@ function findCategoryItem(name: string, columnIndex: number): Element | null {
 
   // Strategy B: 전역 폴백 — 텍스트 정확 일치 + 가시 + leaf 우선
   const allItems = [...document.querySelectorAll<HTMLElement>(
-    'li, button, [role="option"], [class*="ategory"] *'
+    'li, button, [role="option"], [role="listitem"], [class*="ategory"] *'
   )];
   const visibleExact = allItems.filter(
     el =>
@@ -153,7 +153,15 @@ function findCategoryItem(name: string, columnIndex: number): Element | null {
   const leaf = visibleExact.find(
     el => !([...el.children] as HTMLElement[]).some(c => c.textContent?.trim())
   );
-  return leaf ?? visibleExact[0] ?? null;
+  if (leaf ?? visibleExact[0]) return leaf ?? visibleExact[0];
+
+  // Strategy D: aria-label / data-* 속성 폴백
+  const ariaMatch = [...document.querySelectorAll<HTMLElement>('[aria-label], [data-name], [data-category]')]
+    .find(el => {
+      const label = el.getAttribute('aria-label') || el.getAttribute('data-name') || el.getAttribute('data-category');
+      return label?.trim() === name && (el as HTMLElement).offsetParent !== null;
+    });
+  return ariaMatch ?? null;
 }
 
 // ────────────────────────────────────────────────────────────────────

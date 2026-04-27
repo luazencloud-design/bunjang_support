@@ -59,11 +59,12 @@ const CATEGORY_TREE_TEXT = DEFAULT_CATEGORY_TREE
 
 function buildFullPrompt(input: GeminiInput): string {
   const conditionLine = input.condition ? `- 상품 상태: ${input.condition}` : '';
-  const costLine      = input.cost      ? `- 원가: ¥${input.cost}` : '';
-  const priceLine     = input.price     ? `- 판매가: ₩${input.price}` : '';
+  const costLine      = input.cost      ? `- 원가: ${input.cost}` : '';
+  const priceLine     = input.price     ? `- 판매가: ${input.price}` : '';
 
-  return `당신은 번개장터에서 일본 직구 상품을 판매하는 한국 셀러의 AI 어시스턴트입니다.
-아래 상품 정보를 바탕으로 번개장터 등록에 최적화된 상품명 5개, 설명 초안, 검색 태그를 생성하세요.
+  return `당신은 번개장터 셀러의 AI 어시스턴트입니다.
+아래 상품 정보를 바탕으로 번개장터 등록에 최적화된 상품명 5개, 설명 초안, 검색 태그, 카테고리를 생성하세요.
+매입 출처(국내/해외)나 재고 상태는 신경 쓰지 말고, 주어진 정보로 상품 자체에 집중하세요.
 
 [상품 정보]
 - 브랜드: ${input.brand}
@@ -80,12 +81,13 @@ ${priceLine}
 - 한국 소비자가 실제로 검색하는 키워드 활용
 
 [설명 초안 작성 지침]
-- 일본 정품 직구 상품임을 명시
-- 상품 컨디션을 구체적으로 기술 (흠집, 사용감 등)
-- 박스/부속품 포함 여부 기재
+- 상품 자체의 사실 정보 중심 (브랜드/모델/주요 사양·특징)
+- 상품 컨디션을 구체적으로 기술 (흠집, 사용감 등 — 입력된 상태 기준)
+- 박스/부속품 포함 여부 (정보 있을 때만)
 - 주요 사이즈/스펙 핵심만 간결하게
 - 2~4문장으로 작성
 - 이모지 사용 금지
+- 매입 출처(국내/해외/직구 등) 단정적으로 쓰지 말 것
 - 배송 정책, 정품 보증, 반품 안내는 작성하지 마세요 (별도 템플릿으로 추가됨)
 
 [태그 작성 지침]
@@ -110,7 +112,7 @@ ${CATEGORY_TREE_TEXT}
     { "style": "간결 직관",      "title": "..." },
     { "style": "한정·희소성",    "title": "..." },
     { "style": "상태·컨디션",    "title": "..." },
-    { "style": "일본어 병기",    "title": "..." }
+    { "style": "원어 병기",      "title": "..." }
   ],
   "description": "...",
   "tags": ["태그1", "태그2", "태그3", "태그4", "태그5"],
@@ -119,7 +121,7 @@ ${CATEGORY_TREE_TEXT}
 }
 
 function buildTagsPrompt(input: GeminiInput): string {
-  return `번개장터 일본 직구 상품의 검색 태그를 생성하세요.
+  return `번개장터 상품의 검색 태그를 생성하세요.
 
 [상품 정보]
 - 브랜드: ${input.brand}

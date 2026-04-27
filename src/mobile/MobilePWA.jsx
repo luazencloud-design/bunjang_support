@@ -23,7 +23,7 @@ const DEFAULT_SETTINGS = {
   fxRateUsd: 1380,
   shipping:  3500,
   feeRate:   0.06,
-  costCurrency: 'JPY',  // 'JPY' | 'USD' | 'KRW'
+  costCurrency: 'KRW',  // 'JPY' | 'USD' | 'KRW' — 한국 매입이 기본 (필요 시 ¥/$로 변경)
 };
 
 // ─── CSS ─────────────────────────────────────────────────────────────
@@ -675,6 +675,19 @@ function MobilePWA({ tweaks }){
                 {margin.profit >= 0 ? '+' : ''}{Math.round(margin.profit).toLocaleString()}
                 <span className="m-margin-pct">원 · {margin.pct.toFixed(1)}%</span>
               </div>
+              {/* 메루카리 노출가 참고 — 번개장터 메루카리 연동 시 일본 buyer가 보게 될 환산가 */}
+              {price > 0 && (
+                <div style={{
+                  fontSize:11, color:'var(--ink-3)', marginTop:8,
+                  paddingTop:8, borderTop:'1px dashed var(--line-2)',
+                  display:'flex', justifyContent:'space-between', alignItems:'center',
+                }}>
+                  <span>🇯🇵 메루카리 노출가 (참고)</span>
+                  <span style={{fontFamily:'JetBrains Mono, monospace', fontWeight:600, color:'var(--ink-2)'}}>
+                    ≈ ¥{Math.round(price / (settings.fxRateJpy || 9.3)).toLocaleString()}
+                  </span>
+                </div>
+              )}
               <div className="m-fx-status">
                 <span title={fxMeta?.date ? `Frankfurter (ECB) · ${fxMeta.date} 기준` : '환율 미동기'}>
                   {fxMeta

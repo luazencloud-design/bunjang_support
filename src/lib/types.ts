@@ -10,7 +10,7 @@ export interface Product {
   id: string;                     // Date.now().toString() 또는 ulid
   title: string;
   cost: number;                   // 원가 (단위는 costCurrency)
-  costCurrency?: Currency;        // 원가 단위 — 기본 JPY (일본 직구 가정)
+  costCurrency?: Currency;        // 원가 단위 — 기본 KRW (대부분 한국 매입; 일본 직구는 ¥로 변경)
   price: number;                  // 판매가 (단위는 priceCurrency)
   priceCurrency?: Currency;       // 판매가 단위 — 기본 KRW (번개장터 등록가)
   desc: string;                   // 상품 설명
@@ -56,6 +56,10 @@ export interface Settings {
   dark: boolean;
   accent: string;                 // CSS 컬러 (기본 '#151515')
   autoScan: boolean;              // PWA 자동 스캔
+  // Sticky 통화 — 사용자가 마지막에 선택한 통화를 다음 상품의 기본값으로
+  // (대부분 비즈니스 방향이 일정하므로 매번 바꿀 필요 없게)
+  lastCostCurrency?: Currency;    // 기본 KRW
+  lastPriceCurrency?: Currency;   // 기본 KRW
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -68,6 +72,8 @@ export const DEFAULT_SETTINGS: Settings = {
   dark: false,
   accent: '#151515',
   autoScan: true,
+  lastCostCurrency: 'KRW',
+  lastPriceCurrency: 'KRW',
 };
 
 // 통화 → KRW 환산 단가

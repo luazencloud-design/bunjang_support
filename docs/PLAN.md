@@ -564,28 +564,87 @@ export const storage = {
 | Phase 4 | 통화 셀렉터 (USD/JPY/KRW) + Frankfurter 자동 환율 + 사이즈 picker cloak | 2026-04-27 |
 | Phase 5 | 모바일 PWA 실기능 (카메라+ZXing+메루카리+manifest+SW+이력) | 2026-04-27 |
 
-### Phase 6 — 배포 인프라 (지금 진행 중)
+### Phase 6 — 배포 인프라
 **목표**: 영구 URL로 PWA 노출 + 자동 배포 파이프라인
 
-- 변경사항 commit & push → PR
-- Vercel GitHub 연동 → PWA 영구 URL 발급 (`vercel.json` 이미 작성됨)
-- Chrome Web Store 베타 리스팅
+- ✅ Vercel GitHub 연동 → PWA 영구 URL 발급 (`vercel.json` 작성)
+- ⏳ Chrome Web Store 베타 리스팅
   - 확장 아이콘 PNG (16/48/128) 제작
   - 스크린샷 + 설명문 작성
 
-**산출물**: PWA 영구 URL + 확장 베타 출시
+**산출물**: PWA 영구 URL ✅, 확장 베타 출시 ⏳
 
 ---
 
-### Phase 7 — 백엔드 + 큐 코어 (Supabase)
+### Phase 7 — PWA OCR (택 사진 → 자동 채움)
+**목표**: 바코드 의존도 낮추고 택/라벨 사진으로 상품 정보 자동 추출
+
+**문제 인식**:
+- 바코드 검색은 아울렛/구형/한정판 hit률 낮음 (자동 DB 조회는 사실상 불가)
+- 사이즈 정보는 바코드에 안 담김
+- 신발/의류 셀러는 택을 사진 찍는 게 더 직관적
+
+**기술 선택 — Gemini Vision** (확장에 이미 통합)
+- 이미지 + 프롬프트 → 구조화된 JSON 응답
+- 무료 1,500회/일, 한국어/일본어/영어 동시 처리
+- OCR + 의미 이해 (사이즈/색상/모델코드/가격 구분)
+- Tesseract.js 대비: 정확도 95%+ vs 70%, 번들 크기 0 vs 10MB+
+
+#### 7.1 Gemini Vision 호출 헬퍼
+- `src/lib/gemini.ts`에 `extractFromTagImage(blob, apiKey): Promise<TagInfo>` 추가
+- 응답 스키마:
+```ts
+interface TagInfo {
+  brand?: string;
+  model?: string;
+  modelCode?: string;       // DH7568-100 같은 SKU
+  size?: string;            // "260" | "US 9" | "M"
+  color?: string;
+  price?: number;
+  currency?: 'KRW' | 'JPY' | 'USD';
+  rawText: string;          // OCR 원본 (사용자가 검수 가능)
+}
+```
+
+#### 7.2 PWA UI
+- 스캔 탭에 [📷 택 분석] 버튼 추가 (바코드 스캐너와 별도)
+- 카메라로 택 촬영 → 1~2초 분석 → 결과 카드 자동 채움
+- 결과 카드 칩 표시: 브랜드 / 모델 / 사이즈 / 색상 / 가격
+- 각 필드 사용자 수정 가능 (추출 오류 대비)
+- 멀티 검색 버튼이 추출된 "브랜드 + 모델" 사용
+
+#### 7.3 PWA 설정
+- Gemini API 키 입력 칸 (확장과 별도 — origin 격리)
+- localStorage에 저장
+- 키 없으면 [📷 택 분석] 버튼 비활성화 + 안내
+
+#### 7.4 비용 / 한도
+- Gemini 2.5 Flash + 이미지: ~$0.0001/회
+- 무료 1,500회/일이면 개인 셀러 충분
+- 초과 시 사용자 본인 결제 (BYOK 모델)
+
+#### 7.5 워크플로 비교
+**기존 (바코드)**: 스캔 → 숫자 → 검색 → 0건 → 수동 입력
+**신규 (OCR)**: 택 사진 → Gemini → 자동 채움 → 검색 → 정확한 결과
+
+#### 7.6 추가 가능 (옵션)
+- 가격 추출 시 마진 계산에 자동 cost 입력
+- 사이즈 정보 → 확장 자동입력 시 사이즈 picker 자동 선택 (Phase 8 백엔드 큐와 연동)
+- 사진 자체를 백엔드 큐에 첨부 (Phase 8 후 가능)
+
+**산출물**: 신발/의류 셀러용 실용 매입 도구 완성
+
+---
+
+### Phase 8 — 백엔드 + 큐 코어 (Supabase)
 **목표**: 현장 → 사무실 태스크 전달 워크플로 동작
 
-#### 7.1 인프라 셋업
+#### 8.1 인프라 셋업
 - Supabase 프로젝트 (Tokyo region)
 - 스키마: `workspaces` / `workspace_members` / `product_tasks` / Storage 버킷 `task-photos`
 - pg_cron으로 3일 후 자동 삭제
 
-#### 7.2 백엔드 추상화 레이어 (portable 설계)
+#### 8.2 백엔드 추상화 레이어 (portable 설계)
 ```
 src/lib/backend/
   ├─ index.ts          # 인터페이스만 export (Backend 인터페이스)
@@ -598,21 +657,22 @@ src/lib/backend/
 - Realtime은 옵션 (폴링 폴백)
 - JWT는 표준 토큰
 
-#### 7.3 인증
+#### 8.3 인증
 - 매직링크 로그인 (이메일) — 양쪽(PWA·확장)
 - JWT 토큰 chrome.storage / localStorage 보관
 
-#### 7.4 PWA 측
+#### 8.4 PWA 측
 - "📤 사무실로 보내기" 버튼 → 사진 Storage 업로드 → DB insert
+- (Phase 7 OCR 결과까지 함께 첨부)
 - "내 보낸 큐" 탭 — 본인 태스크 상태 (대기/처리중/완료/거절)
 
-#### 7.5 확장 측
+#### 8.5 확장 측
 - 사이드패널 상단 로그인 섹션
 - "📥 받은 큐" 섹션 — Realtime 알림 + 배지
 - 클릭 → "받기" → status='in_progress' (락) → 폼 자동 채움 + 사진 IndexedDB로 다운로드
 - 자동입력 → "✅ 완료 처리" → DB row 닫고 사진 즉시 삭제
 
-#### 7.6 데이터 보관 정책 (Transient Queue)
+#### 8.6 데이터 보관 정책 (Transient Queue)
 - 백엔드: 처리 중인 태스크만 (3일 후 자동 삭제)
 - 사진: 처리 완료 시 즉시 Storage에서 삭제
 - 이력: 양쪽 로컬에만 영구 보관 (chrome.storage / localStorage)
@@ -621,10 +681,10 @@ src/lib/backend/
 
 ---
 
-### Phase 8 — 운영 기능 강화
+### Phase 9 — 운영 기능 강화
 **목표**: 실제 셀러가 매일 쓸 만한 완성도
 
-- PWA 멀티 검색 버튼 (번장/당근/쿠팡/메루카리) + 검색어 직접 편집
+- ✅ PWA 멀티 검색 버튼 (번장/당근/쿠팡/메루카리) + 검색어 직접 편집 (PR #10)
 - 태스크 거절/재할당
 - 본인 보낸 큐 상태 보기
 - 알림 (Notification API)
@@ -633,7 +693,7 @@ src/lib/backend/
 
 ---
 
-### Phase 9 — 베타 + 운영 안정화
+### Phase 10 — 베타 + 운영 안정화
 **목표**: 실사용 피드백 수집 + PMF 검증
 
 - 베타 테스터 5~10명 모집 (한국 셀러 커뮤니티)
@@ -644,7 +704,7 @@ src/lib/backend/
 
 ---
 
-### Phase 10 — 수익화 (PMF 확인 후)
+### Phase 11 — 수익화 (PMF 확인 후)
 **목표**: 지속 가능한 비즈니스 모델
 
 - 카카오 OAuth (한국인 친화적)

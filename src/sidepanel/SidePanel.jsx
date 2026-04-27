@@ -10,8 +10,11 @@ import {
   draft as draftStore,
   settings as settingsStore,
   categoryOptionsCache,
+  templates as templatesStore,
+  history as historyStore,
 } from '../lib/storage';
 import { DEFAULT_CATEGORY_TREE, CATEGORY_EXTRA_OPTIONS } from '../lib/bunjang-categories';
+import { fetchFxRates, fetchFxRatesIfStale } from '../lib/fx';
 
 const useStateSP = useState;
 const useEffectSP = useEffect;
@@ -22,13 +25,32 @@ const useRefSP = useRef;
 const DEFAULT_AI_SETTINGS = {
   apiKey: '',
   model: 'flash',          // 'flash' | 'pro'
-  fxRate: 9.3,
+  fxRate: 9.3,             // [legacy] 마이그레이션용 — 신규 필드는 fxRateJpy/fxRateUsd
+  fxRateJpy: 9.3,          // 엔→원
+  fxRateUsd: 1380,         // 달러→원
   shipping: 3500,
   feeRate: 0.06,
   dark: false,
   accent: '#151515',
   autoScan: true,
 };
+
+// ── 통화 (USD/JPY/KRW) ─────────────────────────────────────────
+const CURRENCIES = [
+  { code: 'JPY', symbol: '¥', label: '엔' },
+  { code: 'USD', symbol: '$', label: '달러' },
+  { code: 'KRW', symbol: '₩', label: '원' },
+];
+
+function currencyToKrw(amount, currency, settings) {
+  if (!amount) return 0;
+  switch (currency) {
+    case 'KRW': return amount;
+    case 'USD': return amount * (settings.fxRateUsd || 1380);
+    case 'JPY':
+    default:    return amount * (settings.fxRateJpy || settings.fxRate || 9.3);
+  }
+}
 
 // 기본 AI 상품명 (Gemini 호출 전 placeholder)
 const DEFAULT_AI_TITLES = [
@@ -205,6 +227,17 @@ const sidepanelCss = `
     font-variant-numeric: tabular-nums;
   }
   .sp-num .unit{ font-size: 11px; color: var(--ink-3); font-weight:500; }
+  .sp-num .sp-cur{
+    border:none; outline:none; background:transparent;
+    font-size: 11px; color: var(--ink-2); font-weight:500;
+    cursor: pointer; padding: 2px 0 2px 4px;
+    margin-left: 2px;
+    border-left: 1px solid var(--line-2);
+    appearance: none; -webkit-appearance: none;
+    text-align: right;
+  }
+  .sp-num .sp-cur:hover{ color: var(--accent); }
+  .sp-num .sp-cur:focus{ color: var(--accent); }
 
   /* Image slots */
   .sp-imgs{ display:grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
@@ -526,7 +559,9 @@ function SidePanel({ tweaks }){
   const [product, setProduct] = useStateSP({
     title: '',
     cost: 0,
+    costCurrency: 'JPY',  // 'JPY' | 'USD' | 'KRW' — 원가 단위 (기본 일본 직구)
     price: 0,
+    priceCurrency: 'KRW', // 판매가 단위 — 기본 번개장터 등록가(원)
     desc: '',
     imgs: [],            // IndexedDB 키 배열 (예: ['img:1714...-abc'])
     tags: [],
@@ -537,6 +572,18 @@ function SidePanel({ tweaks }){
   // 기본값 = 번장 카테고리 스냅샷, 동기화 누르면 실제 페이지에서 덮어씀
   const [catTree] = useStateSP(DEFAULT_CATEGORY_TREE);
   const [catTreeLoading, setCatTreeLoading] = useStateSP(false);
+  // 템플릿 (storage 기반)
+  const [tplList, setTplList] = useStateSP([]);
+  const [tplEditIdx, setTplEditIdx] = useStateSP(null); // null=보기, -1=새추가, >=0=편집
+  const [tplDraft, setTplDraft] = useStateSP({ name: '', text: '' });
+  // 환율 인라인 편집
+  const [editingFx, setEditingFx] = useStateSP(false);
+  const [fxDraft, setFxDraft] = useStateSP('');
+  // 환율 자동 갱신 메타데이터 (fetchedAt, source, date)
+  const [fxMeta, setFxMeta] = useStateSP(null);    // null | { fetchedAt, source, date }
+  const [fxLoading, setFxLoading] = useStateSP(false);
+  // 최근 등록 이력
+  const [recentHistory, setRecentHistory] = useStateSP([]);
   const [catOptionsCache, setCatOptionsCache] = useStateSP({}); // { 'a>b>c': CategoryOptionGroup[] }
   const [catOptionsLoading, setCatOptionsLoading] = useStateSP(false);
   // Settings (chrome.storage.local 영구 저장)
@@ -566,8 +613,9 @@ function SidePanel({ tweaks }){
   const [currentUrl, setCurrentUrl] = useStateSP('');
   const [isBunjang, setIsBunjang] = useStateSP(false);
 
-  // 마진 계산용 — settings에서 동기화
-  const fx = appSettings.fxRate;
+  // 마진 계산용 — settings에서 동기화 (legacy fxRate → fxRateJpy 자동 마이그레이션)
+  const fxJpy = appSettings.fxRateJpy ?? appSettings.fxRate ?? 9.3;
+  const fxUsd = appSettings.fxRateUsd ?? 1380;
   const shipping = appSettings.shipping;
   const feeRate = appSettings.feeRate;
 
@@ -614,9 +662,48 @@ function SidePanel({ tweaks }){
           }
           if (savedSettings) {
             setAppSettings(s => ({ ...s, ...savedSettings }));
+            // 환율 캐시 메타도 복원 (자동 갱신 필요 여부 판단용)
+            if (savedSettings.fxMeta) setFxMeta(savedSettings.fxMeta);
           }
           if (savedOptsCache && typeof savedOptsCache === 'object') {
             setCatOptionsCache(savedOptsCache);
+          }
+          // 템플릿 + 이력
+          const [savedTpls, savedHist] = await Promise.all([
+            templatesStore.getAll(),
+            historyStore.getAll(),
+          ]);
+          if (!alive) return;
+          setTplList(savedTpls);
+          setRecentHistory(savedHist.slice(0, 20));
+
+          // ── 환율 자동 갱신 (캐시 6시간 초과 시) ──
+          // 백그라운드에서 조용히 시도 — 실패해도 사용자 입력 값 유지
+          const cachedMeta = savedSettings?.fxMeta;
+          const cached = cachedMeta && savedSettings?.fxRateJpy && savedSettings?.fxRateUsd
+            ? {
+                fxRateJpy: savedSettings.fxRateJpy,
+                fxRateUsd: savedSettings.fxRateUsd,
+                fetchedAt: cachedMeta.fetchedAt,
+                source: cachedMeta.source,
+                date: cachedMeta.date,
+              }
+            : null;
+          try {
+            const fresh = await fetchFxRatesIfStale(cached);
+            if (!alive) return;
+            // 캐시 그대로면 fetchedAt 동일 → state 변경 안 함
+            if (!cached || fresh.fetchedAt !== cached.fetchedAt) {
+              setAppSettings(s => ({
+                ...s,
+                fxRateJpy: fresh.fxRateJpy,
+                fxRateUsd: fresh.fxRateUsd,
+                fxRate: fresh.fxRateJpy,  // legacy 동기화
+              }));
+              setFxMeta({ fetchedAt: fresh.fetchedAt, source: fresh.source, date: fresh.date });
+            }
+          } catch (e) {
+            console.warn('[sidepanel] 환율 자동 갱신 실패 (사용자 값 유지):', e);
           }
         }
       } catch (e) {
@@ -627,6 +714,30 @@ function SidePanel({ tweaks }){
     })();
     return () => { alive = false; };
   }, []);
+
+  // ── Alt+1~9: 템플릿 빠른 삽입 ──
+  // e.code 사용 (e.key는 macOS Alt+1 = '¡' 같은 특수문자로 변환됨)
+  useEffectSP(() => {
+    const onKeyDown = (e) => {
+      if (!e.altKey) return;
+      // e.code: 'Digit1' ~ 'Digit9' (키보드 위치 기반, 입력 모드/locale 무관)
+      const m = /^Digit([1-9])$/.exec(e.code || '');
+      if (!m) return;
+      const n = parseInt(m[1], 10);
+      const tpl = tplList[n - 1];
+      if (!tpl) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setProduct(p => {
+        const sep = p.desc && !p.desc.endsWith('\n') ? '\n\n' : '';
+        return { ...p, desc: p.desc + sep + tpl.text };
+      });
+      showToast(`"${tpl.name}" 삽입 (Alt+${n})`);
+    };
+    // capture: true — input/textarea의 keydown보다 먼저 잡아서 텍스트 입력 막음
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [tplList]);
 
   // ── 초안 자동 저장 (debounced 500ms) ──
   useEffectSP(() => {
@@ -642,8 +753,10 @@ function SidePanel({ tweaks }){
   useEffectSP(() => {
     if (!settingsLoaded) return;
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    settingsStore.set(appSettings).catch(e => console.warn('[sidepanel] settings 저장 실패:', e));
-  }, [appSettings, settingsLoaded]);
+    // fxMeta도 함께 저장 (다음 mount 시 캐시 유효성 판단용)
+    const toSave = fxMeta ? { ...appSettings, fxMeta } : appSettings;
+    settingsStore.set(toSave).catch(e => console.warn('[sidepanel] settings 저장 실패:', e));
+  }, [appSettings, fxMeta, settingsLoaded]);
 
   // ── 이미지 미리보기 로드 (product.imgs 변경 시 신규 키만 로드) ──
   useEffectSP(() => {
@@ -670,16 +783,38 @@ function SidePanel({ tweaks }){
   }, [product.imgs]);
 
   const margin = useMemoSP(()=>{
-    const c = product.cost * fx;
-    const fee = product.price * feeRate;
-    const profit = product.price - c - shipping - fee;
-    const pct = product.price > 0 ? profit/product.price * 100 : 0;
-    return { cost: c, fee, profit, pct };
-  }, [product, fx, shipping, feeRate]);
+    const costKrw  = currencyToKrw(product.cost,  product.costCurrency  ?? 'JPY', appSettings);
+    const priceKrw = currencyToKrw(product.price, product.priceCurrency ?? 'KRW', appSettings);
+    const fee = priceKrw * feeRate;
+    const profit = priceKrw - costKrw - shipping - fee;
+    const pct = priceKrw > 0 ? profit/priceKrw * 100 : 0;
+    return { cost: costKrw, price: priceKrw, fee, profit, pct };
+  }, [product, fxJpy, fxUsd, shipping, feeRate]);
 
   function showToast(msg){
     setToast(msg);
     setTimeout(()=>setToast(null), 1600);
+  }
+
+  // ── 환율 수동 새로고침 (Frankfurter API) ──
+  async function refreshFxRates() {
+    if (fxLoading) return;
+    setFxLoading(true);
+    try {
+      const fresh = await fetchFxRates();
+      setAppSettings(s => ({
+        ...s,
+        fxRateJpy: fresh.fxRateJpy,
+        fxRateUsd: fresh.fxRateUsd,
+        fxRate: fresh.fxRateJpy,
+      }));
+      setFxMeta({ fetchedAt: fresh.fetchedAt, source: fresh.source, date: fresh.date });
+      showToast(`환율 갱신 완료 — ¥${fresh.fxRateJpy} / $${fresh.fxRateUsd} (${fresh.date})`);
+    } catch (e) {
+      showToast('환율 조회 실패: ' + (e?.message || String(e)));
+    } finally {
+      setFxLoading(false);
+    }
   }
 
   // 태그 자동생성 — Gemini API 실 호출
@@ -944,12 +1079,39 @@ function SidePanel({ tweaks }){
     setInjecting(true);
     setDiagResults(null);
     try {
-      const response = await chrome.runtime.sendMessage({ type: 'inject', product });
+      // ⚠️ content script는 bunjang.co.kr origin이라 sidepanel(chrome-extension://)이
+      // 저장한 IndexedDB에 직접 접근 불가. 여기서 dataURL로 직렬화해 함께 전달.
+      let imageData = [];
+      if (Array.isArray(product.imgs) && product.imgs.length > 0) {
+        const loaded = await Promise.all(
+          product.imgs.map(async (key, idx) => {
+            try {
+              const url = await loadImageAsDataURL(key);
+              if (!url) return null;
+              const m = /^data:([^;]+);/.exec(url);
+              const mime = m ? m[1] : 'image/jpeg';
+              const ext = mime.includes('png') ? 'png' : 'jpg';
+              return { name: `image-${idx + 1}.${ext}`, type: mime, data: url };
+            } catch {
+              return null;
+            }
+          }),
+        );
+        imageData = loaded.filter(x => x !== null);
+      }
+      // 번개장터는 원화만 받음 — 판매가가 USD/JPY면 KRW로 환산해 전송
+      const priceKrw = Math.round(currencyToKrw(product.price, product.priceCurrency ?? 'KRW', appSettings));
+      const productForInject = { ...product, price: priceKrw, priceCurrency: 'KRW' };
+      const response = await chrome.runtime.sendMessage({ type: 'inject', product: productForInject, imageData });
       if (response?.results) {
         setDiagResults(response.results);
         const ok = response.results.filter(r => r.ok).length;
         const total = response.results.length;
         showToast(`자동입력 완료 ${ok}/${total} 성공`);
+        // 등록 이력 저장
+        const entry = { ...product, id: String(Date.now()), createdAt: Date.now(), registeredAt: Date.now() };
+        await historyStore.add(entry);
+        setRecentHistory(h => [entry, ...h].slice(0, 20));
       } else {
         showToast('응답 없음 — content script 확인 필요');
       }
@@ -991,14 +1153,28 @@ function SidePanel({ tweaks }){
     }
   }
 
-  const TPL = [
-    { name: '배송 안내', text: '📦 구매 확정 후 1~2일 내 출고됩니다.\nCJ대한통운 기준, 제주/도서산간 추가 3,000원.' },
-    { name: '정품 보증', text: '✅ 100% 정품 보증. 일본 공식 스토어 매입건.' },
-    { name: '문의 안내', text: '💬 채팅 문의 환영. 실측/컨디션 사진 요청 가능.' },
-    { name: '상품 상태', text: '🏷️ S급 (미사용에 가까움) / 박스·택 포함.' },
-    { name: '반품 정책', text: '↩️ 단순 변심 반품 가능 (7일 이내, 왕복비 구매자).' },
-    { name: '네고 정책', text: '💸 과도한 할인 요청은 답변드리지 않을 수 있습니다.' },
-  ];
+  // 템플릿 저장 / 삭제 헬퍼
+  async function saveTplItem(idx, draft) {
+    let next;
+    if (idx === -1) {
+      // 새 추가
+      const newTpl = { id: `tpl-u-${Date.now()}`, name: draft.name || '새 템플릿', text: draft.text, builtin: false };
+      next = [...tplList, newTpl];
+    } else {
+      next = tplList.map((t, i) => i === idx ? { ...t, name: draft.name || t.name, text: draft.text } : t);
+    }
+    setTplList(next);
+    await templatesStore.save(next);
+    setTplEditIdx(null);
+    showToast(idx === -1 ? '템플릿 추가됨' : '템플릿 저장됨');
+  }
+  async function deleteTplItem(idx) {
+    const next = tplList.filter((_, i) => i !== idx);
+    setTplList(next);
+    await templatesStore.save(next);
+    if (tplActive >= next.length) setTplActive(Math.max(0, next.length - 1));
+    showToast('템플릿 삭제됨');
+  }
 
   return (
     <div className={`sp-root ${tweaks.dark?'dark':''}`} style={{'--accent': tweaks.accent}}>
@@ -1178,17 +1354,53 @@ function SidePanel({ tweaks }){
           </div>
           <div className="sp-row">
             <div className="sp-field">
-              <label className="sp-label">원가</label>
+              <label className="sp-label" title="구매 원가. 통화는 옆 셀렉터로 변경 (마진 계산용 — 번개장터에 입력되지 않음).">
+                원가 <span style={{fontSize:10, color:'var(--ink-3)', fontWeight:400, marginLeft:4}}>구매가 · 마진용</span>
+              </label>
               <div className="sp-num">
-                <input type="number" value={product.cost} onChange={e=>setProduct({...product, cost:+e.target.value||0})}/>
-                <span className="unit">¥</span>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  min="0"
+                  placeholder="0"
+                  value={product.cost === 0 ? '' : product.cost}
+                  onChange={e => {
+                    const v = e.target.value;
+                    setProduct({ ...product, cost: v === '' ? 0 : (Number(v) || 0) });
+                  }}
+                />
+                <select className="sp-cur"
+                  value={product.costCurrency ?? 'JPY'}
+                  onChange={e => setProduct({ ...product, costCurrency: e.target.value })}>
+                  {CURRENCIES.map(c => (
+                    <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>
+                  ))}
+                </select>
               </div>
             </div>
             <div className="sp-field">
-              <label className="sp-label">판매가</label>
+              <label className="sp-label" title="번개장터에 등록될 판매가. 통화는 옆 셀렉터로 변경 (KRW가 아니면 마진 계산만 환산).">
+                판매가 <span style={{fontSize:10, color:'var(--ink-3)', fontWeight:400, marginLeft:4}}>등록가</span>
+              </label>
               <div className="sp-num">
-                <input type="number" value={product.price} onChange={e=>setProduct({...product, price:+e.target.value||0})}/>
-                <span className="unit">₩</span>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min="0"
+                  placeholder="0"
+                  value={product.price === 0 ? '' : product.price}
+                  onChange={e => {
+                    const v = e.target.value;
+                    setProduct({ ...product, price: v === '' ? 0 : (Number(v) || 0) });
+                  }}
+                />
+                <select className="sp-cur"
+                  value={product.priceCurrency ?? 'KRW'}
+                  onChange={e => setProduct({ ...product, priceCurrency: e.target.value })}>
+                  {CURRENCIES.map(c => (
+                    <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>
+                  ))}
+                </select>
               </div>
             </div>
           </div>
@@ -1323,7 +1535,47 @@ function SidePanel({ tweaks }){
           </span>
         }>
           <div className="sp-margin">
-            <div className="sp-margin-row"><span>원가 (환산 {fx}원/엔)</span><span className="v">{Math.round(margin.cost).toLocaleString()}원</span></div>
+            {(() => {
+              const costCur = product.costCurrency ?? 'JPY';
+              const costSym = (CURRENCIES.find(c => c.code === costCur) ?? CURRENCIES[0]).symbol;
+              const isKrw = costCur === 'KRW';
+              const fxField = costCur === 'USD' ? 'fxRateUsd' : 'fxRateJpy';
+              const fxValue = costCur === 'USD' ? fxUsd : fxJpy;
+              return (
+                <div className="sp-margin-row">
+                  <span style={{display:'flex', alignItems:'center', gap:3}}>
+                    원가{isKrw ? '' : ' (환산'}
+                    {!isKrw && (editingFx ? (
+                      <input autoFocus type="number" step="0.1" value={fxDraft}
+                        style={{width:54, border:'none', borderBottom:'1px solid var(--accent)', background:'transparent',
+                          color:'var(--ink)', fontFamily:'JetBrains Mono', fontSize:12, padding:'0 2px', outline:'none', marginLeft:4}}
+                        onChange={e => setFxDraft(e.target.value)}
+                        onBlur={() => { setAppSettings(s => ({...s, [fxField]: +fxDraft || s[fxField]})); setEditingFx(false); }}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { setAppSettings(s => ({...s, [fxField]: +fxDraft || s[fxField]})); setEditingFx(false); }
+                          if (e.key === 'Escape') setEditingFx(false);
+                        }}
+                        onClick={e => e.stopPropagation()}
+                      />
+                    ) : (
+                      <span style={{borderBottom:'1px dashed var(--ink-3)', cursor:'pointer', paddingBottom:1, marginLeft:4}}
+                        title="클릭해서 환율 수정"
+                        onClick={() => { setFxDraft(String(fxValue)); setEditingFx(true); }}>
+                        {fxValue}
+                      </span>
+                    ))}
+                    {!isKrw && ` 원/${costSym})`}
+                  </span>
+                  <span className="v">{Math.round(margin.cost).toLocaleString()}원</span>
+                </div>
+              );
+            })()}
+            {product.priceCurrency && product.priceCurrency !== 'KRW' && (
+              <div className="sp-margin-row" style={{color:'var(--ink-3)', fontSize:11}}>
+                <span>판매가 환산 ({(CURRENCIES.find(c=>c.code===product.priceCurrency)??CURRENCIES[2]).symbol} → ₩)</span>
+                <span className="v">{Math.round(margin.price).toLocaleString()}원</span>
+              </div>
+            )}
             <div className="sp-margin-row"><span>배송비</span><span className="v">{shipping.toLocaleString()}원</span></div>
             <div className="sp-margin-row"><span>플랫폼 수수료 ({(feeRate*100).toFixed(1)}%)</span><span className="v">{Math.round(margin.fee).toLocaleString()}원</span></div>
             <div className="sp-margin-total">
@@ -1335,34 +1587,106 @@ function SidePanel({ tweaks }){
                 <span className="pct">{margin.pct>=0?'+':''}{margin.pct.toFixed(1)}%</span>
               </span>
             </div>
+            {/* FX 자동 갱신 상태 + 수동 새로고침 */}
+            <div style={{
+              display:'flex', justifyContent:'space-between', alignItems:'center',
+              fontSize:10, color:'var(--ink-3)', marginTop:8, paddingTop:6,
+              borderTop:'1px dashed var(--line-2)',
+            }}>
+              <span title={fxMeta?.source === 'frankfurter' || fxMeta?.source === 'fallback'
+                ? `Frankfurter API (ECB) · ${fxMeta.date ?? ''}`
+                : '환율 자동 조회 안 됨 — 수동 입력 값'}>
+                {fxMeta
+                  ? `자동 갱신 · ${new Date(fxMeta.fetchedAt).toLocaleString('ko-KR', {month:'numeric', day:'numeric', hour:'numeric', minute:'2-digit'})}${fxMeta.date ? ` (${fxMeta.date} 기준)` : ''}`
+                  : '환율 수동 입력 중'}
+              </span>
+              <button
+                onClick={refreshFxRates}
+                disabled={fxLoading}
+                title="Frankfurter API에서 USD/JPY 환율 새로 가져오기"
+                style={{
+                  border:'none', background:'transparent',
+                  cursor: fxLoading ? 'wait' : 'pointer',
+                  fontSize:11, color:'var(--accent)', fontWeight:600,
+                  padding:'2px 6px', borderRadius:4,
+                  opacity: fxLoading ? 0.5 : 1,
+                }}>
+                {fxLoading ? '⏳ 갱신 중…' : '🔄 새로고침'}
+              </button>
+            </div>
           </div>
         </SPSection>
 
         {/* Templates */}
-        <SPSection title="템플릿" meta={`${TPL.length}개`} defaultOpen={false}>
-          <div style={{display:'flex', flexDirection:'column', gap:2, marginBottom:10}}>
-            {TPL.map((t,i)=>(
-              <div key={i} className={`sp-tpl-row ${tplActive===i?'active':''}`} onClick={()=>setTplActive(i)}>
-                <div className="sp-tpl-sc">{i+1}</div>
+        <SPSection title="템플릿" meta={`${tplList.length}개`} defaultOpen={false}>
+          <div style={{display:'flex', flexDirection:'column', gap:2, marginBottom:8}}>
+            {tplList.map((t, i) => (
+              <div key={t.id} className={`sp-tpl-row ${tplActive===i?'active':''}`}
+                onClick={() => { setTplActive(i); setTplEditIdx(null); }}>
+                <div className="sp-tpl-sc" title={`Alt+${i+1}`}>{i+1}</div>
                 <div style={{flex:1, minWidth:0}}>
                   <div className="sp-tpl-name">{t.name}</div>
                   <div className="sp-tpl-prev" style={{whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
                     {t.text.replace(/\n/g,' · ')}
                   </div>
                 </div>
-                {tplActive===i && SPI.check()}
+                <button className="sp-btn xs" title="편집"
+                  onClick={e => { e.stopPropagation(); setTplActive(i); setTplEditIdx(i); setTplDraft({name:t.name, text:t.text}); }}
+                  style={{marginLeft:4, opacity:.6}}>
+                  {SPI.carrot()}
+                </button>
+                {!t.builtin && (
+                  <button className="sp-btn xs" title="삭제"
+                    onClick={e => { e.stopPropagation(); deleteTplItem(i); }}
+                    style={{marginLeft:2, opacity:.5}}>
+                    {SPI.x()}
+                  </button>
+                )}
               </div>
             ))}
           </div>
-          <textarea className="sp-textarea" defaultValue={TPL[tplActive].text} style={{minHeight:60}} key={tplActive}/>
-          <div className="sp-row" style={{marginTop:8}}>
-            <button className="sp-btn block">{SPI.copy()} 복사만</button>
-            <button className="sp-btn primary block" onClick={()=>{
-              const sep = product.desc.endsWith('\n') || !product.desc ? '' : '\n\n';
-              setProduct({...product, desc: product.desc + sep + TPL[tplActive].text});
-              showToast('설명에 삽입됨');
-            }}>{SPI.plus()} 설명에 삽입</button>
-          </div>
+
+          {/* 편집 / 추가 폼 */}
+          {tplEditIdx !== null ? (
+            <div style={{background:'var(--surface-2)', borderRadius:8, padding:10, marginBottom:8, border:'1px solid var(--line)'}}>
+              <input className="sp-input" placeholder="템플릿 이름" value={tplDraft.name}
+                onChange={e => setTplDraft(d => ({...d, name: e.target.value}))}
+                style={{marginBottom:6}}/>
+              <textarea className="sp-textarea" placeholder="템플릿 내용" value={tplDraft.text}
+                style={{minHeight:60}} onChange={e => setTplDraft(d => ({...d, text: e.target.value}))}/>
+              <div className="sp-row" style={{marginTop:6}}>
+                <button className="sp-btn block" onClick={() => setTplEditIdx(null)}>취소</button>
+                <button className="sp-btn primary block" onClick={() => saveTplItem(tplEditIdx, tplDraft)}>
+                  {tplEditIdx === -1 ? '추가' : '저장'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {tplList[tplActive] && (
+                <>
+                  <textarea className="sp-textarea" value={tplList[tplActive].text} style={{minHeight:60}}
+                    onChange={e => setTplList(l => l.map((t,i) => i===tplActive ? {...t, text:e.target.value} : t))}/>
+                  <div className="sp-row" style={{marginTop:6}}>
+                    <button className="sp-btn block" onClick={async () => {
+                      await navigator.clipboard.writeText(tplList[tplActive].text);
+                      showToast('복사됨');
+                    }}>{SPI.copy()} 복사</button>
+                    <button className="sp-btn primary block" onClick={() => {
+                      const sep = product.desc && !product.desc.endsWith('\n') ? '\n\n' : '';
+                      setProduct(p => ({...p, desc: p.desc + sep + tplList[tplActive].text}));
+                      showToast(`"${tplList[tplActive].name}" 삽입됨`);
+                    }}>{SPI.plus()} 설명에 삽입</button>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+          <button className="sp-btn block" style={{marginTop:6, fontSize:11.5}}
+            onClick={() => { setTplEditIdx(-1); setTplDraft({name:'', text:''}); }}>
+            + 새 템플릿 추가
+          </button>
+          <div className="sp-hint" style={{marginTop:6}}>Alt+1~9 로 빠르게 설명에 삽입</div>
         </SPSection>
 
         {/* Diagnosis — open by default, key value of side panel */}
@@ -1395,11 +1719,41 @@ function SidePanel({ tweaks }){
           )}
         </SPSection>
 
-        {/* Recent */}
-        <SPSection title="최근 등록" meta="3건" defaultOpen={false}>
-          <div className="sp-hint" style={{textAlign:'center', padding:'20px 0'}}>
-            최근 등록 기록이 여기 표시됩니다
-          </div>
+        {/* Recent history */}
+        <SPSection title="최근 등록" meta={`${recentHistory.length}건`} defaultOpen={false}>
+          {recentHistory.length === 0 ? (
+            <div className="sp-hint" style={{textAlign:'center', padding:'20px 0'}}>
+              자동입력 완료 후 이력이 표시됩니다
+            </div>
+          ) : (
+            <div style={{display:'flex', flexDirection:'column', gap:5}}>
+              {recentHistory.map((h, i) => (
+                <div key={h.id || i}
+                  style={{padding:'8px 10px', background:'var(--surface)', borderRadius:8,
+                    border:'1px solid var(--line)', cursor:'pointer'}}
+                  title="클릭해서 폼에 불러오기"
+                  onClick={() => {
+                    setProduct(p => ({ ...p, ...h, imgs: p.imgs }));
+                    showToast(`"${h.title || '(제목 없음)'}" 불러옴`);
+                  }}>
+                  <div style={{fontSize:12, fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                    {h.title || '(제목 없음)'}
+                  </div>
+                  <div style={{fontSize:10, color:'var(--ink-3)', marginTop:2, display:'flex', gap:8}}>
+                    <span>{h.price ? h.price.toLocaleString()+'원' : '—'}</span>
+                    <span>{h.categoryPath?.join(' > ') || ''}</span>
+                    <span style={{marginLeft:'auto'}}>
+                      {h.registeredAt ? new Date(h.registeredAt).toLocaleDateString('ko-KR', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''}
+                    </span>
+                  </div>
+                </div>
+              ))}
+              <button className="sp-btn block" style={{fontSize:11, marginTop:2}}
+                onClick={async () => { await historyStore.clear(); setRecentHistory([]); showToast('이력 삭제됨'); }}>
+                이력 전체 삭제
+              </button>
+            </div>
+          )}
         </SPSection>
       </div>
 
@@ -1476,11 +1830,22 @@ function SidePanel({ tweaks }){
                   <label className="sp-label">환율 (원/엔)</label>
                   <div className="sp-num">
                     <input type="number" step="0.1"
-                      value={appSettings.fxRate}
-                      onChange={(e) => setAppSettings(s => ({...s, fxRate: +e.target.value || 0}))}/>
+                      value={appSettings.fxRateJpy ?? appSettings.fxRate ?? 9.3}
+                      onChange={(e) => setAppSettings(s => ({...s, fxRateJpy: +e.target.value || 0, fxRate: +e.target.value || 0}))}/>
                     <span className="unit">원/¥</span>
                   </div>
                 </div>
+                <div className="sp-field">
+                  <label className="sp-label">환율 (원/달러)</label>
+                  <div className="sp-num">
+                    <input type="number" step="1"
+                      value={appSettings.fxRateUsd ?? 1380}
+                      onChange={(e) => setAppSettings(s => ({...s, fxRateUsd: +e.target.value || 0}))}/>
+                    <span className="unit">원/$</span>
+                  </div>
+                </div>
+              </div>
+              <div className="sp-row">
                 <div className="sp-field">
                   <label className="sp-label">배송비</label>
                   <div className="sp-num">
@@ -1501,7 +1866,7 @@ function SidePanel({ tweaks }){
                 </div>
               </div>
 
-              {/* 초안 */}
+              {/* 초안
               <div style={{fontSize:11, fontWeight:700, color:'var(--ink-2)', textTransform:'uppercase', letterSpacing:'0.08em', marginTop:18, marginBottom:8}}>
                 초안 관리
               </div>
@@ -1524,7 +1889,7 @@ function SidePanel({ tweaks }){
                   setSettingsOpen(false);
                 }}>
                 현재 초안 + 이미지 삭제
-              </button>
+              </button> */}
 
               <div style={{display:'flex', justifyContent:'flex-end', marginTop:18}}>
                 <button className="sp-btn primary" onClick={() => { setSettingsOpen(false); showToast('설정 저장됨'); }}>

@@ -1,8 +1,32 @@
-// mobile.jsx — Mobile PWA scanner inside an iOS frame
-// NOTE: From design bundle as-is. Only the React import block and bottom export changed.
+// MobilePWA.jsx — 모바일 PWA: 카메라 바코드 스캔 → 메루카리 시세 → 마진 계산
+// 디자인은 그대로 유지하면서 모든 기능을 실제로 동작하게 연결.
+//
+// 통신:
+//   - 카메라: getUserMedia + ZXing (src/lib/scanner.ts)
+//   - 환율:    Frankfurter API (src/lib/fx.ts)
+//   - 메루카리: 검색 URL 생성 (src/lib/mercari.ts) → 새 탭 열기
+//   - 저장:    localStorage (history, settings) — 확장 IndexedDB와는 분리
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { BarcodeScanner } from '../lib/scanner';
+import { fetchFxRatesIfStale, fetchFxRates } from '../lib/fx';
+import { buildMercariSearchUrl, buildMercariBarcodeUrl, isValidJan } from '../lib/mercari';
 
+// ─── localStorage key ──────────────────────────────────────────────
+const LS_KEY_HISTORY  = 'bunjang-mobile:history';
+const LS_KEY_SETTINGS = 'bunjang-mobile:settings';
+const LS_KEY_FXMETA   = 'bunjang-mobile:fxMeta';
+
+// ─── 기본 설정 ────────────────────────────────────────────────────────
+const DEFAULT_SETTINGS = {
+  fxRateJpy: 9.3,
+  fxRateUsd: 1380,
+  shipping:  3500,
+  feeRate:   0.06,
+  costCurrency: 'JPY',  // 'JPY' | 'USD' | 'KRW'
+};
+
+// ─── CSS ─────────────────────────────────────────────────────────────
 const mobileCss = `
   .m-root{
     --bg: #fbfaf7;
@@ -35,23 +59,15 @@ const mobileCss = `
   }
   .m-root *{box-sizing:border-box}
 
-  .m-topbar{
-    display:flex; align-items:center; gap:10px;
-    padding: 6px 20px 10px;
-  }
-  .m-topbar h1{
-    margin:0; font-size: 24px; font-weight: 700;
-    letter-spacing: -0.03em;
-  }
+  .m-topbar{ display:flex; align-items:center; gap:10px; padding: 6px 20px 10px; }
+  .m-topbar h1{ margin:0; font-size: 24px; font-weight: 700; letter-spacing: -0.03em; }
   .m-topbar-sub{ color: var(--ink-3); font-size: 13px; font-weight: 500; margin-top: 2px; }
-
   .m-topbar-icon{
     width: 36px; height: 36px; border-radius: 999px;
     background: var(--chip); display:flex; align-items:center; justify-content:center;
     color: var(--ink-2); border:none;
   }
 
-  /* Tab pill bar */
   .m-segbar{
     margin: 0 16px 12px; padding: 4px;
     background: var(--chip); border-radius: 14px;
@@ -66,46 +82,24 @@ const mobileCss = `
   }
   .m-seg.active{ background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.06); }
 
-  /* Scrollable body */
   .m-body{ flex:1; overflow-y:auto; padding: 0 16px 28px; -webkit-overflow-scrolling: touch; }
   .m-body::-webkit-scrollbar{ display: none; }
 
-  /* Scanner viewport */
   .m-scan{
-    position: relative;
-    aspect-ratio: 3/4;
+    position: relative; aspect-ratio: 3/4;
     background: #0a0a0a; border-radius: 20px;
-    overflow: hidden;
-    margin-bottom: 14px;
+    overflow: hidden; margin-bottom: 14px;
     box-shadow: 0 1px 2px rgba(0,0,0,.05), 0 8px 24px rgba(0,0,0,.06);
   }
-  .m-scan-video{
-    position:absolute; inset:0;
-    background:
-      radial-gradient(ellipse at 50% 40%, #3a3834 0%, #1a1917 60%, #060606 100%);
-  }
-  .m-scan-product{
-    position:absolute; left: 12%; top: 18%; right: 12%; bottom: 18%;
-    background: linear-gradient(135deg, rgba(255,200,120,0.15), rgba(200,150,80,0.1));
-    border-radius: 10px;
-    display:flex; align-items:center; justify-content:center;
-    color: rgba(255,255,255,0.25);
-    font-family:monospace; font-size: 11px;
-  }
-  .m-scan-overlay{
-    position: absolute; inset: 0;
-    display: flex; flex-direction: column; justify-content: space-between;
-    padding: 16px;
-  }
-  .m-scan-top{
-    display: flex; justify-content: space-between; gap: 8px;
-  }
+  .m-scan-video{ position:absolute; inset:0; width:100%; height:100%; object-fit: cover; background: #0a0a0a; }
+  .m-scan-overlay{ position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; padding: 16px; pointer-events: none; }
+  .m-scan-overlay > *{ pointer-events: auto; }
+  .m-scan-top{ display: flex; justify-content: space-between; gap: 8px; }
   .m-scan-pill{
     padding: 5px 10px; border-radius: 999px;
-    background: rgba(0,0,0,.45); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    background: rgba(0,0,0,.55); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     color: white; font-size: 11px; font-weight: 600;
-    display: flex; align-items: center; gap: 6px;
-    letter-spacing: -0.005em;
+    display: flex; align-items: center; gap: 6px; letter-spacing: -0.005em;
   }
   .m-scan-pill .live{
     width: 6px; height: 6px; border-radius: 999px;
@@ -113,18 +107,9 @@ const mobileCss = `
     animation: pulse 1.4s ease-in-out infinite;
   }
   @keyframes pulse{ 50%{opacity:.4} }
-  .m-scan-frame{
-    position: absolute; inset: 0; display:flex; align-items:center; justify-content:center;
-    pointer-events:none;
-  }
-  .m-scan-window{
-    width: 78%; height: 30%;
-    border-radius: 14px;
-    box-shadow: 0 0 0 9999px rgba(0,0,0,.45);
-    position: relative;
-  }
-  .m-scan-window::before, .m-scan-window::after,
-  .m-scan-window > i, .m-scan-window > b{
+  .m-scan-frame{ position: absolute; inset: 0; display:flex; align-items:center; justify-content:center; pointer-events:none; }
+  .m-scan-window{ width: 78%; height: 30%; border-radius: 14px; box-shadow: 0 0 0 9999px rgba(0,0,0,.40); position: relative; }
+  .m-scan-window::before, .m-scan-window::after, .m-scan-window > i, .m-scan-window > b{
     content:''; position:absolute; width: 24px; height: 24px;
     border: 2.5px solid var(--accent);
   }
@@ -142,15 +127,12 @@ const mobileCss = `
     0%,100%{ transform: translateY(-40%); opacity:.3 }
     50%{ transform: translateY(40%); opacity:1 }
   }
-
-  .m-scan-bottom{
-    display: flex; justify-content: center; gap: 14px;
-  }
+  .m-scan-bottom{ display: flex; justify-content: center; gap: 14px; }
   .m-scan-btn{
     width: 48px; height: 48px; border-radius: 999px;
-    background: rgba(255,255,255,.15); backdrop-filter: blur(12px);
+    background: rgba(255,255,255,.18); backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(255,255,255,.2);
+    border: 1px solid rgba(255,255,255,.25);
     color: white; display:flex; align-items:center; justify-content:center;
   }
   .m-scan-capture{
@@ -158,75 +140,68 @@ const mobileCss = `
     background: white; border: 4px solid rgba(255,255,255,.3);
     box-shadow: 0 0 0 1px rgba(0,0,0,.1);
   }
+  .m-scan-perm{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    flex-direction:column; gap:14px; padding: 24px; text-align:center;
+    color: rgba(255,255,255,.85); font-size: 13.5px; line-height: 1.5;
+  }
+  .m-scan-perm button{
+    background: var(--accent); color: white; border:none;
+    padding: 12px 22px; border-radius: 999px;
+    font-family: inherit; font-size: 14px; font-weight: 700;
+    box-shadow: 0 4px 14px oklch(68% 0.15 45 / 0.4);
+  }
 
-  /* Result card */
   .m-card{
     background: var(--surface); border: 1px solid var(--line);
-    border-radius: 16px; padding: 14px;
-    margin-bottom: 12px;
+    border-radius: 16px; padding: 14px; margin-bottom: 12px;
   }
-  .m-card-head{
-    display:flex; align-items:flex-start; gap:10px;
-    margin-bottom: 10px;
-  }
+  .m-card-head{ display:flex; align-items:flex-start; gap:10px; margin-bottom: 10px; }
   .m-thumb{
-    width: 52px; height: 52px; border-radius: 10px;
-    flex-shrink: 0; background-size:cover; background-position:center;
+    width: 52px; height: 52px; border-radius: 10px; flex-shrink: 0;
+    background-size:cover; background-position:center;
+    background-color: var(--chip);
+    display:flex; align-items:center; justify-content:center;
+    color: var(--ink-3); font-family: 'JetBrains Mono', monospace; font-size: 9.5px;
   }
-  .m-card-title{
-    font-size: 14.5px; font-weight: 600; letter-spacing:-.02em;
-    line-height: 1.3;
-  }
-  .m-card-meta{
-    font-size: 11.5px; color: var(--ink-3); margin-top: 3px;
-    font-family: 'JetBrains Mono', 'SF Mono', monospace;
-  }
+  .m-card-title{ font-size: 14.5px; font-weight: 600; letter-spacing:-.02em; line-height: 1.3; word-break: break-all; }
+  .m-card-meta{ font-size: 11.5px; color: var(--ink-3); margin-top: 3px; font-family: 'JetBrains Mono', 'SF Mono', monospace; }
 
-  /* Margin big display */
   .m-margin{
-    padding: 16px;
-    border-radius: 16px;
+    padding: 16px; border-radius: 16px;
     background:
       linear-gradient(135deg, oklch(68% 0.15 45 / 0.1), oklch(68% 0.15 45 / 0.02)),
       var(--surface);
-    border: 1px solid var(--line);
-    margin-bottom: 12px;
+    border: 1px solid var(--line); margin-bottom: 12px;
   }
   .m-margin-label{ font-size: 12px; color: var(--ink-2); font-weight: 500; }
   .m-margin-value{
     font-family: 'JetBrains Mono','SF Mono', monospace;
     font-variant-numeric: tabular-nums;
     font-size: 40px; font-weight: 700;
-    letter-spacing: -0.035em;
-    line-height: 1.1;
-    margin-top: 2px;
+    letter-spacing: -0.035em; line-height: 1.1; margin-top: 2px;
   }
   .m-margin-profit.pos{ color: var(--success); }
   .m-margin-profit.neg{ color: var(--danger); }
   .m-margin-pct{
     font-family: 'JetBrains Mono', monospace;
-    font-size: 13px; color: var(--ink-3); font-weight: 500;
-    margin-left: 6px;
+    font-size: 13px; color: var(--ink-3); font-weight: 500; margin-left: 6px;
+  }
+  .m-fx-status{
+    display:flex; justify-content:space-between; align-items:center;
+    font-size: 10.5px; color: var(--ink-3); margin-top: 10px;
+    padding-top: 8px; border-top: 1px dashed var(--line-2);
+  }
+  .m-fx-status button{
+    border:none; background:transparent; color: var(--accent); font-weight: 700;
+    font-size: 11px; cursor: pointer; padding: 2px 6px;
   }
 
   .m-row{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-
   .m-field{ display:flex; flex-direction:column; gap: 5px; margin-bottom: 10px; }
   .m-field label{ font-size: 12px; font-weight: 500; color: var(--ink-2); }
-  .m-input{
-    border: 1px solid var(--line-2); background: var(--surface);
-    border-radius: 10px; padding: 12px 14px;
-    font-size: 16px; font-family: inherit;
-    color: var(--ink);
-    letter-spacing: -0.015em;
-    -webkit-appearance: none;
-    transition: border .12s, box-shadow .12s;
-  }
-  .m-input:focus{
-    outline:none; border-color: var(--accent);
-    box-shadow: 0 0 0 3px oklch(68% 0.15 45 / 0.12);
-  }
-  .m-num{ display:flex; align-items:center;
+  .m-num{
+    display:flex; align-items:center;
     border: 1px solid var(--line-2); background: var(--surface);
     border-radius: 10px; padding: 2px 14px;
     transition: border .12s, box-shadow .12s;
@@ -234,30 +209,32 @@ const mobileCss = `
   .m-num:focus-within{ border-color: var(--accent); box-shadow: 0 0 0 3px oklch(68% 0.15 45 / 0.12); }
   .m-num input{
     flex:1; border:none; outline:none; background:transparent;
-    padding: 12px 0;
-    font-size: 18px; font-weight: 600;
+    padding: 12px 0; font-size: 18px; font-weight: 600;
     font-family: 'JetBrains Mono', 'SF Mono', monospace;
-    color: var(--ink); min-width:0;
-    letter-spacing: -0.01em;
+    color: var(--ink); min-width:0; letter-spacing: -0.01em;
   }
-  .m-num .unit{ font-size: 13px; color: var(--ink-3); font-weight: 500; }
+  .m-num select{
+    border: none; background: transparent; outline: none;
+    font-family: inherit; font-size: 12px; color: var(--ink-2);
+    font-weight: 600; padding: 4px 0 4px 6px; margin-left: 4px;
+    border-left: 1px solid var(--line-2);
+    appearance: none; -webkit-appearance: none;
+  }
 
   .m-btn{
     border: none; background: var(--chip); color: var(--ink);
     padding: 14px 16px; border-radius: 12px;
     font-family: inherit; font-size: 15px; font-weight: 600;
     display:flex; align-items:center; justify-content:center; gap:8px;
-    letter-spacing:-.01em;
-    width: 100%;
+    letter-spacing:-.01em; width: 100%;
   }
+  .m-btn:disabled{ opacity: .5; }
   .m-btn.primary{ background: var(--ink); color: white; }
   .m-btn.accent{
     background: var(--accent); color: white;
     box-shadow: 0 2px 10px oklch(68% 0.15 45 / 0.3);
   }
-
   .m-action-row{ display:flex; gap:8px; margin-bottom: 14px; }
-
   .m-chip{
     display:inline-flex; align-items:center; gap:4px;
     font-size: 11px; font-weight:600; padding: 3px 8px;
@@ -266,7 +243,6 @@ const mobileCss = `
   .m-chip.success{ background: oklch(95% 0.05 150); color: oklch(40% 0.12 150); }
   .m-chip.accent{ background: oklch(95% 0.04 45); color: var(--accent); }
 
-  /* History */
   .m-hist-row{
     display:flex; align-items:center; gap:12px;
     padding: 12px 0; border-bottom: 1px solid var(--line);
@@ -274,34 +250,20 @@ const mobileCss = `
   .m-hist-row:last-child{ border-bottom: none; }
   .m-hist-info{ flex: 1; min-width: 0; }
   .m-hist-title{ font-size: 14px; font-weight: 600; letter-spacing:-.015em;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .m-hist-meta{ font-size: 11px; color: var(--ink-3); margin-top: 2px; font-family:'JetBrains Mono', monospace; }
   .m-hist-profit{
     font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 14px;
     font-variant-numeric: tabular-nums;
   }
-
-  /* Photo strip */
-  .m-photos{
-    display:grid; grid-template-columns: repeat(3, 1fr); gap:6px;
-    margin-top: 8px;
-  }
-  .m-photo{
-    aspect-ratio:1; border-radius:10px; background-size:cover; background-position:center;
-    position: relative;
-  }
-  .m-photo .m-photo-i{
-    position:absolute; top:4px; left:5px;
-    background: rgba(0,0,0,.55); color: white;
-    border-radius: 5px; padding: 1px 5px; font-size: 9.5px; font-weight:600;
-    font-family: 'JetBrains Mono', monospace;
+  .m-empty{
+    text-align:center; padding: 40px 16px; color: var(--ink-3); font-size: 13.5px; line-height: 1.5;
   }
 
   .m-section-title{
     font-size: 11px; font-weight: 700; color: var(--ink-3);
     text-transform: uppercase; letter-spacing: 0.08em;
-    margin: 6px 0 8px;
+    margin: 6px 0 8px; display:flex; align-items:center; justify-content:space-between;
   }
 
   @keyframes toast-up{
@@ -309,7 +271,7 @@ const mobileCss = `
     to{ opacity: 1; transform: translate(-50%, 0); }
   }
   .m-toast{
-    position: absolute; left: 50%; bottom: 36px;
+    position: fixed; left: 50%; bottom: 36px;
     transform: translateX(-50%);
     background: var(--ink); color: white;
     padding: 10px 16px; border-radius: 999px;
@@ -317,7 +279,7 @@ const mobileCss = `
     animation: toast-up .2s ease-out;
     display:flex; align-items:center; gap:8px;
     box-shadow: 0 6px 20px rgba(0,0,0,.25);
-    z-index: 40;
+    z-index: 40; max-width: 86vw;
   }
 `;
 
@@ -331,52 +293,256 @@ const MIcon = {
   barcode:({s=16}={})=>(<svg width={s} height={s} viewBox="0 0 16 16" fill="none"><path d="M2 3v10M4 3v10M6 3v10M8.5 3v10M10.5 3v10M13 3v10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>),
   check:({s=14}={})=>(<svg width={s} height={s} viewBox="0 0 14 14" fill="none"><path d="M3 7L6 10L11 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>),
   merc:({s=14}={})=>(<svg width={s} height={s} viewBox="0 0 14 14" fill="none"><rect x="1.5" y="1.5" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.3"/><text x="7" y="9.5" textAnchor="middle" fontSize="6" fontFamily="monospace" fill="currentColor" fontWeight="700">M</text></svg>),
+  refresh:({s=14}={})=>(<svg width={s} height={s} viewBox="0 0 14 14" fill="none"><path d="M2 7a5 5 0 0 1 9-3M12 7a5 5 0 0 1-9 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/><path d="M9 4h2.5V1.5M5 10H2.5v2.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>),
 };
 
-function stripedBG(seed){
-  const pals = [['#f2e6d6','#e2d1b3'],['#e7dfd1','#d0c4ab'],['#eadfd0','#d5c4a8']];
-  const [a,b] = pals[seed % pals.length];
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><defs><pattern id='p' width='8' height='8' patternUnits='userSpaceOnUse' patternTransform='rotate(45)'><rect width='8' height='8' fill='${a}'/><rect width='4' height='8' fill='${b}'/></pattern></defs><rect width='100' height='100' fill='url(#p)'/></svg>`;
-  return 'data:image/svg+xml;utf8,'+encodeURIComponent(svg);
+// ─── 통화 ─────────────────────────────────────────────────────────────
+const CURRENCIES = [
+  { code: 'JPY', symbol: '¥', label: '엔' },
+  { code: 'USD', symbol: '$', label: '달러' },
+  { code: 'KRW', symbol: '₩', label: '원' },
+];
+function toKrw(amount, currency, settings) {
+  if (!amount) return 0;
+  switch (currency) {
+    case 'KRW': return amount;
+    case 'USD': return amount * (settings.fxRateUsd || 1380);
+    case 'JPY':
+    default:    return amount * (settings.fxRateJpy || 9.3);
+  }
 }
 
-function MobilePWA({ tweaks }){
-  const [tab, setTab] = useState('scan');
-  const [scanned, setScanned] = useState(null);
-  const [cost, setCost] = useState(8900);
-  const [price, setPrice] = useState(139000);
-  const [toast, setToast] = useState(null);
-  const [photos, setPhotos] = useState([stripedBG(0), stripedBG(1)]);
+// ─── localStorage 헬퍼 ────────────────────────────────────────────────
+function loadJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function saveJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
 
-  function showToast(msg){
+// ─── 메인 ────────────────────────────────────────────────────────────
+function MobilePWA({ tweaks }){
+  // URL ?tab= 파라미터 읽어서 초기 탭 결정 (PWA shortcut 지원)
+  const initialTab = useMemo(() => {
+    const u = new URL(window.location.href);
+    const t = u.searchParams.get('tab');
+    return ['scan', 'margin', 'history'].includes(t) ? t : 'scan';
+  }, []);
+
+  const [tab, setTab] = useState(initialTab);
+  const [settings, setSettings] = useState(() => ({
+    ...DEFAULT_SETTINGS,
+    ...loadJson(LS_KEY_SETTINGS, {}),
+  }));
+  const [fxMeta, setFxMeta] = useState(() => loadJson(LS_KEY_FXMETA, null));
+  const [fxLoading, setFxLoading] = useState(false);
+
+  // 스캔 결과
+  const [scanned, setScanned] = useState(null); // { code, format, ts } | null
+  const [scanState, setScanState] = useState('idle'); // 'idle' | 'permission' | 'scanning' | 'error'
+  const [scanError, setScanError] = useState(null);
+
+  // 마진 입력
+  const [cost, setCost] = useState(0);
+  const [costCurrency, setCostCurrency] = useState(settings.costCurrency || 'JPY');
+  const [price, setPrice] = useState(0);
+
+  // 사진 (Blob[])
+  const [photos, setPhotos] = useState([]);
+
+  // 이력 (localStorage)
+  const [history, setHistory] = useState(() => loadJson(LS_KEY_HISTORY, []));
+
+  const [toast, setToast] = useState(null);
+  function showToast(msg) {
     setToast(msg);
-    setTimeout(()=>setToast(null), 1600);
+    setTimeout(() => setToast(null), 1800);
   }
 
-  // Auto-simulate scan after mounting
-  useEffect(()=>{
-    if(tab === 'scan' && !scanned){
-      const t = setTimeout(()=>{
-        setScanned({
-          code: '4901234567894',
-          title: 'Adidas Samba OG Core Black',
-          brand: 'adidas',
-          category: 'スニーカー',
-        });
-        showToast('바코드 인식 완료');
-      }, 2200);
-      return ()=>clearTimeout(t);
-    }
-  }, [tab, scanned]);
+  // 카메라/스캐너 ref
+  const videoRef = useRef(null);
+  const scannerRef = useRef(null);
 
-  const margin = useMemo(()=>{
-    const fx = 9.3, shipping = 3500, feeRate = 0.03;
-    const c = cost * fx;
-    const fee = price * feeRate;
-    const profit = price - c - shipping - fee;
+  // ─── 환율 자동 갱신 (mount 시 + 6h 캐시) ───
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const cached = fxMeta && settings.fxRateJpy && settings.fxRateUsd
+        ? { fxRateJpy: settings.fxRateJpy, fxRateUsd: settings.fxRateUsd, fetchedAt: fxMeta.fetchedAt, source: fxMeta.source, date: fxMeta.date }
+        : null;
+      try {
+        const fresh = await fetchFxRatesIfStale(cached);
+        if (!alive) return;
+        if (!cached || fresh.fetchedAt !== cached.fetchedAt) {
+          setSettings(s => ({ ...s, fxRateJpy: fresh.fxRateJpy, fxRateUsd: fresh.fxRateUsd }));
+          setFxMeta({ fetchedAt: fresh.fetchedAt, source: fresh.source, date: fresh.date });
+        }
+      } catch (e) {
+        console.warn('[mobile] 환율 자동 갱신 실패:', e);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  // settings/fxMeta 자동 저장
+  useEffect(() => { saveJson(LS_KEY_SETTINGS, settings); }, [settings]);
+  useEffect(() => { saveJson(LS_KEY_FXMETA, fxMeta); }, [fxMeta]);
+  useEffect(() => { saveJson(LS_KEY_HISTORY, history); }, [history]);
+
+  // ─── 카메라/스캐너 라이프사이클 ───
+  // 'scan' 탭일 때만 스캐너 실행, 다른 탭으로 가면 즉시 정지 (배터리/프라이버시)
+  useEffect(() => {
+    if (tab !== 'scan') {
+      if (scannerRef.current) {
+        scannerRef.current.stop();
+        scannerRef.current = null;
+      }
+      setScanState('idle');
+      return;
+    }
+    let alive = true;
+    (async () => {
+      if (!videoRef.current) return;
+      setScanState('permission');
+      try {
+        const scanner = new BarcodeScanner(videoRef.current);
+        await scanner.start((result) => {
+          if (!alive) return;
+          setScanned({ code: result.text, format: result.format, ts: result.timestamp });
+          showToast(`바코드 인식: ${result.text}`);
+          // navigator.vibrate (지원 브라우저만)
+          if (navigator.vibrate) navigator.vibrate(60);
+        });
+        scannerRef.current = scanner;
+        if (alive) setScanState('scanning');
+      } catch (e) {
+        if (alive) {
+          setScanError(e?.message || String(e));
+          setScanState('error');
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+      if (scannerRef.current) {
+        scannerRef.current.stop();
+        scannerRef.current = null;
+      }
+    };
+  }, [tab]);
+
+  // ─── 마진 계산 ───
+  const margin = useMemo(() => {
+    const costKrw = toKrw(cost, costCurrency, settings);
+    const fee = price * (settings.feeRate || 0);
+    const profit = price - costKrw - (settings.shipping || 0) - fee;
     const pct = price > 0 ? profit / price * 100 : 0;
-    return { cost: c, fee, profit, pct };
-  }, [cost, price]);
+    return { cost: costKrw, fee, profit, pct };
+  }, [cost, costCurrency, price, settings]);
+
+  // ─── 핸들러 ───
+  async function handleRefreshFx() {
+    if (fxLoading) return;
+    setFxLoading(true);
+    try {
+      const fresh = await fetchFxRates();
+      setSettings(s => ({ ...s, fxRateJpy: fresh.fxRateJpy, fxRateUsd: fresh.fxRateUsd }));
+      setFxMeta({ fetchedAt: fresh.fetchedAt, source: fresh.source, date: fresh.date });
+      showToast(`환율 갱신 — ¥${fresh.fxRateJpy} / $${fresh.fxRateUsd}`);
+    } catch (e) {
+      showToast('환율 조회 실패');
+    } finally {
+      setFxLoading(false);
+    }
+  }
+
+  async function handleCapturePhoto() {
+    if (!scannerRef.current) {
+      showToast('카메라가 활성화되지 않았습니다');
+      return;
+    }
+    const blob = await scannerRef.current.capturePhoto();
+    if (!blob) {
+      showToast('캡처 실패');
+      return;
+    }
+    setPhotos(prev => [...prev, blob].slice(-6));
+    showToast(`사진 저장됨 · ${Math.min(photos.length + 1, 6)}/6`);
+  }
+
+  function handleSwitchCamera() {
+    if (scannerRef.current) {
+      scannerRef.current.switchCamera().then(() => {
+        // switchCamera 자체가 스캐너를 stop하므로 useEffect가 재시작
+        setScanState('idle');
+        // 강제 재시작 트리거
+        setTab(t => t);
+      });
+    }
+  }
+
+  function openMercariSearch() {
+    if (!scanned) return;
+    const url = isValidJan(scanned.code)
+      ? buildMercariBarcodeUrl(scanned.code)
+      : buildMercariSearchUrl(scanned.code);
+    window.open(url, '_blank', 'noopener');
+  }
+
+  function jumpToMargin() {
+    setTab('margin');
+  }
+
+  function handleSaveHistory() {
+    if (!cost && !price) {
+      showToast('원가/판매가를 입력하세요');
+      return;
+    }
+    const entry = {
+      id: String(Date.now()),
+      title: scanned?.code ? `바코드 ${scanned.code}` : `즉시 입력 ${new Date().toLocaleString('ko-KR', {month:'numeric', day:'numeric'})}`,
+      cost,
+      costCurrency,
+      price,
+      profit: Math.round(margin.profit),
+      pct: margin.pct,
+      ts: Date.now(),
+      barcode: scanned?.code,
+    };
+    setHistory(h => [entry, ...h].slice(0, 100));
+    showToast('이력에 저장됨');
+  }
+
+  function downloadAllPhotos() {
+    if (photos.length === 0) return;
+    photos.forEach((blob, i) => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `photo-${Date.now()}-${i+1}.jpg`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    });
+    showToast(`${photos.length}장 다운로드`);
+  }
+
+  function clearHistory() {
+    if (history.length === 0) return;
+    if (!confirm('이력 전체를 삭제할까요?')) return;
+    setHistory([]);
+    showToast('이력 삭제됨');
+  }
+
+  // ─── 렌더 ───
+  const photoUrls = useMemo(() => photos.map(b => URL.createObjectURL(b)), [photos]);
+  // cleanup object URLs on unmount/photos change
+  useEffect(() => () => photoUrls.forEach(u => URL.revokeObjectURL(u)), [photoUrls]);
 
   return (
     <div className={`m-root ${tweaks.dark?'dark':''}`} style={{'--accent': tweaks.accent}}>
@@ -387,7 +553,7 @@ function MobilePWA({ tweaks }){
           <h1>스캐너</h1>
           <div className="m-topbar-sub">매장 현장 도구 · PWA</div>
         </div>
-        <button className="m-topbar-icon"><MIcon.history/></button>
+        <button className="m-topbar-icon" onClick={() => setTab('history')} title="이력"><MIcon.history/></button>
       </div>
 
       <div className="m-segbar">
@@ -406,26 +572,37 @@ function MobilePWA({ tweaks }){
         {tab==='scan' && (
           <>
             <div className="m-scan">
-              <div className="m-scan-video">
-                <div className="m-scan-product">product shot</div>
-              </div>
-              <div className="m-scan-frame">
-                <div className="m-scan-window"><i/><b/></div>
-                {!scanned && <div className="m-scan-line"/>}
-              </div>
+              <video ref={videoRef} className="m-scan-video" autoPlay muted playsInline />
+
+              {scanState === 'error' && (
+                <div className="m-scan-perm">
+                  <div>카메라 권한이 거부됐거나 사용할 수 없습니다.</div>
+                  <div style={{fontSize:11.5, opacity:.7}}>{scanError}</div>
+                  <button onClick={() => { setTab('margin'); setTimeout(()=>setTab('scan'), 50); }}>다시 시도</button>
+                </div>
+              )}
+              {scanState === 'permission' && (
+                <div className="m-scan-perm">카메라 권한 요청 중...</div>
+              )}
+
+              {scanState === 'scanning' && (
+                <div className="m-scan-frame">
+                  <div className="m-scan-window"><i/><b/></div>
+                  {!scanned && <div className="m-scan-line"/>}
+                </div>
+              )}
+
               <div className="m-scan-overlay">
                 <div className="m-scan-top">
-                  <div className="m-scan-pill"><span className="live"/>{scanned ? '검출됨' : '탐색 중'}</div>
+                  <div className="m-scan-pill">
+                    <span className="live"/>{scanned ? '검출됨' : (scanState === 'scanning' ? '탐색 중' : '대기')}
+                  </div>
                   <div style={{display:'flex', gap:6}}>
-                    <button className="m-scan-btn"><MIcon.flash/></button>
-                    <button className="m-scan-btn"><MIcon.flip/></button>
+                    <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환"><MIcon.flip/></button>
                   </div>
                 </div>
                 <div className="m-scan-bottom">
-                  <button className="m-scan-capture" onClick={()=>{
-                    setPhotos([...photos, stripedBG(photos.length)].slice(-6));
-                    showToast('사진 저장됨 · '+(photos.length+1)+'/6');
-                  }}/>
+                  <button className="m-scan-capture" onClick={handleCapturePhoto} title="사진 캡처"/>
                 </div>
               </div>
             </div>
@@ -433,39 +610,56 @@ function MobilePWA({ tweaks }){
             {scanned && (
               <div className="m-card">
                 <div className="m-card-head">
-                  <div className="m-thumb" style={{backgroundImage:`url(${stripedBG(0)})`}}/>
+                  <div className="m-thumb">{scanned.format.slice(0,4)}</div>
                   <div style={{flex:1, minWidth:0}}>
-                    <div className="m-card-title">{scanned.title}</div>
-                    <div className="m-card-meta">JAN · {scanned.code}</div>
+                    <div className="m-card-title">{scanned.code}</div>
+                    <div className="m-card-meta">{scanned.format} · {new Date(scanned.ts).toLocaleTimeString('ko-KR')}</div>
                     <div style={{marginTop:6, display:'flex', gap:4, flexWrap:'wrap'}}>
-                      <span className="m-chip success"><MIcon.check s={10}/> 매칭됨</span>
-                      <span className="m-chip">{scanned.brand}</span>
-                      <span className="m-chip">{scanned.category}</span>
+                      {isValidJan(scanned.code) && <span className="m-chip success"><MIcon.check s={10}/> JAN/EAN</span>}
+                      <span className="m-chip">{scanned.format}</span>
                     </div>
                   </div>
                 </div>
                 <div className="m-action-row">
-                  <button className="m-btn" onClick={()=>showToast('메루카리 검색 열기')}>
-                    <MIcon.merc/> 메루카리 조회
+                  <button className="m-btn" onClick={openMercariSearch}>
+                    <MIcon.merc/> 메루카리 시세
                   </button>
-                  <button className="m-btn primary" onClick={()=>setTab('margin')}>
+                  <button className="m-btn primary" onClick={jumpToMargin}>
                     ₩ 마진 계산
                   </button>
                 </div>
+                <button className="m-btn" style={{fontSize:12, padding:'10px 12px', background:'transparent', color:'var(--ink-3)'}}
+                  onClick={() => setScanned(null)}>
+                  스캔 결과 지우기
+                </button>
               </div>
             )}
 
             {photos.length > 0 && (
               <>
-                <div className="m-section-title">촬영 ({photos.length})</div>
-                <div className="m-photos">
-                  {photos.map((p,i)=>(
-                    <div key={i} className="m-photo" style={{backgroundImage:`url(${p})`}}>
-                      <div className="m-photo-i">{i+1}</div>
+                <div className="m-section-title">
+                  <span>촬영 ({photos.length}/6)</span>
+                  <button onClick={() => setPhotos([])}
+                    style={{border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer'}}>
+                    전체 삭제
+                  </button>
+                </div>
+                <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:6, marginTop:8}}>
+                  {photoUrls.map((u, i) => (
+                    <div key={i} style={{
+                      aspectRatio:'1', borderRadius:10, position:'relative',
+                      backgroundImage:`url(${u})`, backgroundSize:'cover', backgroundPosition:'center',
+                    }}>
+                      <div style={{
+                        position:'absolute', top:4, left:5,
+                        background:'rgba(0,0,0,.55)', color:'white', borderRadius:5,
+                        padding:'1px 5px', fontSize:9.5, fontWeight:600,
+                        fontFamily:'JetBrains Mono, monospace',
+                      }}>{i+1}</div>
                     </div>
                   ))}
                 </div>
-                <button className="m-btn" style={{marginTop:10}} onClick={()=>showToast(photos.length+'장 다운로드됨')}>
+                <button className="m-btn" style={{marginTop:10}} onClick={downloadAllPhotos}>
                   <MIcon.download/> 전체 다운로드
                 </button>
               </>
@@ -481,29 +675,45 @@ function MobilePWA({ tweaks }){
                 {margin.profit >= 0 ? '+' : ''}{Math.round(margin.profit).toLocaleString()}
                 <span className="m-margin-pct">원 · {margin.pct.toFixed(1)}%</span>
               </div>
-            </div>
-
-            <div className="m-field">
-              <label>메루카리 원가</label>
-              <div className="m-num">
-                <input type="number" value={cost} onChange={e=>setCost(+e.target.value||0)}/>
-                <span className="unit">¥</span>
-              </div>
-            </div>
-            <div className="m-field">
-              <label>번개장터 판매가</label>
-              <div className="m-num">
-                <input type="number" value={price} onChange={e=>setPrice(+e.target.value||0)}/>
-                <span className="unit">원</span>
+              <div className="m-fx-status">
+                <span title={fxMeta?.date ? `Frankfurter (ECB) · ${fxMeta.date} 기준` : '환율 미동기'}>
+                  {fxMeta
+                    ? `자동 갱신 · ¥${settings.fxRateJpy} / $${settings.fxRateUsd}`
+                    : '환율 수동 입력'}
+                </span>
+                <button onClick={handleRefreshFx} disabled={fxLoading}>
+                  <MIcon.refresh/> {fxLoading ? '…' : '새로고침'}
+                </button>
               </div>
             </div>
 
-            <div className="m-section-title">산출 내역</div>
+            <div className="m-field">
+              <label>원가 (구매가 · 마진용)</label>
+              <div className="m-num">
+                <input type="number" inputMode="decimal" min="0" placeholder="0"
+                  value={cost === 0 ? '' : cost}
+                  onChange={e => { const v = e.target.value; setCost(v === '' ? 0 : (Number(v)||0)); }}/>
+                <select value={costCurrency} onChange={e => setCostCurrency(e.target.value)}>
+                  {CURRENCIES.map(c => <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="m-field">
+              <label>번개장터 판매가 (₩)</label>
+              <div className="m-num">
+                <input type="number" inputMode="numeric" min="0" placeholder="0"
+                  value={price === 0 ? '' : price}
+                  onChange={e => { const v = e.target.value; setPrice(v === '' ? 0 : (Number(v)||0)); }}/>
+                <span className="unit" style={{fontSize:13, color:'var(--ink-3)', fontWeight:500}}>원</span>
+              </div>
+            </div>
+
+            <div className="m-section-title"><span>산출 내역</span></div>
             <div className="m-card" style={{padding: '12px 14px'}}>
               {[
-                ['원가 (환율 9.3원/엔)', Math.round(margin.cost).toLocaleString() + '원'],
-                ['배송비', '3,500원'],
-                ['수수료 (3%)', Math.round(margin.fee).toLocaleString() + '원'],
+                [`원가 (환산 ${(CURRENCIES.find(c=>c.code===costCurrency)??CURRENCIES[0]).symbol})`, Math.round(margin.cost).toLocaleString() + '원'],
+                ['배송비', settings.shipping.toLocaleString() + '원'],
+                [`수수료 (${(settings.feeRate*100).toFixed(1)}%)`, Math.round(margin.fee).toLocaleString() + '원'],
               ].map(([k,v], i)=>(
                 <div key={i} style={{
                   display:'flex', justifyContent:'space-between',
@@ -517,37 +727,94 @@ function MobilePWA({ tweaks }){
               ))}
             </div>
 
-            <button className="m-btn accent" onClick={()=>showToast('기록에 저장됨')} style={{marginTop:8}}>
-              <MIcon.check/> 기록 저장
+            <button className="m-btn accent" onClick={handleSaveHistory} style={{marginTop:8}}>
+              <MIcon.check/> 이력에 저장
             </button>
+
+            <div className="m-section-title" style={{marginTop:18}}><span>설정</span></div>
+            <div className="m-card" style={{padding:'12px 14px'}}>
+              <div className="m-row" style={{marginBottom:10}}>
+                <div className="m-field" style={{marginBottom:0}}>
+                  <label>환율 ¥→₩</label>
+                  <div className="m-num">
+                    <input type="number" step="0.1" value={settings.fxRateJpy}
+                      onChange={e => setSettings(s => ({...s, fxRateJpy: +e.target.value || 0}))}/>
+                  </div>
+                </div>
+                <div className="m-field" style={{marginBottom:0}}>
+                  <label>환율 $→₩</label>
+                  <div className="m-num">
+                    <input type="number" step="1" value={settings.fxRateUsd}
+                      onChange={e => setSettings(s => ({...s, fxRateUsd: +e.target.value || 0}))}/>
+                  </div>
+                </div>
+              </div>
+              <div className="m-row">
+                <div className="m-field" style={{marginBottom:0}}>
+                  <label>배송비</label>
+                  <div className="m-num">
+                    <input type="number" value={settings.shipping}
+                      onChange={e => setSettings(s => ({...s, shipping: +e.target.value || 0}))}/>
+                  </div>
+                </div>
+                <div className="m-field" style={{marginBottom:0}}>
+                  <label>수수료</label>
+                  <div className="m-num">
+                    <input type="number" step="0.01" value={settings.feeRate}
+                      onChange={e => setSettings(s => ({...s, feeRate: +e.target.value || 0}))}/>
+                  </div>
+                </div>
+              </div>
+            </div>
           </>
         )}
 
         {tab==='history' && (
           <>
-            <div className="m-section-title">최근 100건 · 저장됨 3건</div>
-            {[
-              { t:'아디다스 삼바 OG 블랙 270', c:'¥8,900', p:'₩139,000', profit: 52870, ago: '2시간 전' },
-              { t:'New Balance 992 Grey US9', c:'¥22,000', p:'₩248,000', profit: 32860, ago: '어제' },
-              { t:'Nike Air Force 1 LV8 White', c:'¥11,500', p:'₩98,000', profit: -12900, ago: '2일 전' },
-            ].map((h,i)=>(
-              <div key={i} className="m-hist-row">
-                <div className="m-thumb" style={{backgroundImage:`url(${stripedBG(i)})`, width:44, height:44}}/>
-                <div className="m-hist-info">
-                  <div className="m-hist-title">{h.t}</div>
-                  <div className="m-hist-meta">{h.c} → {h.p} · {h.ago}</div>
-                </div>
-                <div className={`m-hist-profit ${h.profit>=0?'pos':'neg'}`}
-                  style={{color: h.profit>=0 ? 'var(--success)' : 'var(--danger)'}}>
-                  {h.profit>=0?'+':''}{(h.profit/1000).toFixed(1)}k
-                </div>
+            <div className="m-section-title">
+              <span>최근 {history.length}건</span>
+              {history.length > 0 && (
+                <button onClick={clearHistory}
+                  style={{border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer'}}>
+                  전체 삭제
+                </button>
+              )}
+            </div>
+            {history.length === 0 ? (
+              <div className="m-empty">
+                저장된 이력이 없습니다.<br/>
+                마진 계산 후 "이력에 저장"을 눌러 보세요.
               </div>
-            ))}
+            ) : (
+              history.map((h) => {
+                const sym = (CURRENCIES.find(c => c.code === (h.costCurrency || 'JPY')) ?? CURRENCIES[0]).symbol;
+                const ago = (Date.now() - h.ts) / 1000;
+                const agoText = ago < 60 ? '방금'
+                  : ago < 3600 ? `${Math.floor(ago/60)}분 전`
+                  : ago < 86400 ? `${Math.floor(ago/3600)}시간 전`
+                  : `${Math.floor(ago/86400)}일 전`;
+                return (
+                  <div key={h.id} className="m-hist-row">
+                    <div className="m-thumb" style={{width:44, height:44, fontSize:8}}>
+                      {h.barcode ? h.barcode.slice(0, 4) : '—'}
+                    </div>
+                    <div className="m-hist-info">
+                      <div className="m-hist-title">{h.title}</div>
+                      <div className="m-hist-meta">{sym}{h.cost.toLocaleString()} → ₩{h.price.toLocaleString()} · {agoText}</div>
+                    </div>
+                    <div className="m-hist-profit"
+                      style={{color: h.profit>=0 ? 'var(--success)' : 'var(--danger)'}}>
+                      {h.profit>=0?'+':''}{(h.profit/1000).toFixed(1)}k
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </>
         )}
-
-        {toast && <div className="m-toast"><MIcon.check/>{toast}</div>}
       </div>
+
+      {toast && <div className="m-toast"><MIcon.check/>{toast}</div>}
     </div>
   );
 }

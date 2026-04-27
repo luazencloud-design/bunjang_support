@@ -504,118 +504,208 @@ export const storage = {
 
 ---
 
-## 8. 현재 구현 상태 (정직)
+## 8. 현재 구현 상태 (2026-04-27 기준)
 
-### ✅ 완료 (Phase 1 포함)
-- Vite + React + TS + @crxjs 골격 빌드 통과
-- 사이드패널 UI 디자인 그대로 렌더 (검정 로고/컬러로 커스터마이즈됨)
-- 모바일 PWA UI 디자인 그대로 렌더
-- 마진 계산 (실제 동작)
-- 템플릿 클릭 → 설명에 삽입 (실제 동작)
-- 탭 전환 (모바일)
-- localtunnel/ngrok 허용 (`allowedHosts: true`)
-- **`src/lib/types.ts`** — Product / Template / Settings / ExtMessage / InjectResult 타입
-- **`src/lib/storage.ts`** — chrome.storage.local 래퍼 (draft / templates / settings / history)
-- **`src/lib/messaging.ts`** — 타입 안전 메시지 헬퍼
-- **`src/content/bunjang.ts`** — SELECTORS 실 검증 완료 (2026-04-23), 메시지 리스너, 필드 주입 함수, 태그/상품상태 주입
-- **`src/background/service-worker.ts`** — inject 메시지 라우팅 (`lastFocusedWindow`), 탭 URL 변경 감지
-- **`src/sidepanel/SidePanel.jsx`** — 자동입력 버튼 실 연결, 진단 섹션 실데이터, 상태 스트립 실 URL, 태그 입력 + 자동생성, 상품상태 5종 버튼
+### ✅ 확장 (Chrome Side Panel) — 출시 가능 수준
+- 골격: Vite + React + TS + @crxjs MV3 사이드패널
+- 디자인 그대로 (검정 로고/컬러)
+- **자동입력 전체 필드** — 상품명/가격/설명/사진/태그/배송비/직거래/상품상태/수량
+- **카테고리 3단계** (대/중/소) 자동 선택 + 사이즈 옵션 (picker cloak로 깜빡임 X)
+  - 모바일 사이트 대응 — touch/pointer/mouse/click 풀 시퀀스
+  - "선택 완료" 버튼 자동 클릭으로 React state 확정
+- **Gemini API** (2.5 Flash/Pro) — 상품명 5종 + 설명 + 태그 + 카테고리 동시 생성
+- **이미지** — IndexedDB 저장 (사이드패널 origin) + base64 dataURL로 content script에 전달 (origin 격리 우회)
+- **마진 계산** — JPY/USD/KRW 통화 셀렉터 + 자동 환율 (Frankfurter API, 6h 캐시)
+- **환율 인라인 편집** — 마진 섹션에서 즉시 수정
+- **사용자 정의 템플릿** + Alt+1~9 단축키 (capture phase로 input 안에서도 동작, e.code 기반)
+- **최근 등록 이력** — `history.add()` + 클릭으로 복원
+- **새 상품 등록** — IndexedDB 이미지 + chrome.storage 초안 일괄 초기화
+- **카테고리 트리 하드코딩** (`bunjang-categories.ts`) — 25개 대분류, 모바일 picker 구조 반영
+- **수수료 6% 기본값**
 
-**Phase 1 전체 동작 검증 완료** (2026-04-23): SW 콘솔 `{type:'inject:result', results: Array(8)}` 응답 확인
+### ✅ 모바일 PWA — 단독 사용 가능 수준
+- React + Vite 별도 빌드 (`pnpm build:mobile`)
+- 카메라 라이브 + 후면 자동 선택 + 카메라 전환
+- ZXing 바코드 인식 (JAN/EAN/UPC/CODE128/QR/DataMatrix)
+- 인식 시 진동 알림 (navigator.vibrate)
+- 메루카리 검색 URL 자동 생성 (가격 오름차순 + 판매중 필터)
+- 사진 캡처 (Blob, 최대 6장) + 일괄 다운로드
+- 마진 계산 — 확장과 동일한 통화/환율 로직
+- 자동 환율 (Frankfurter API)
+- 이력 — localStorage, 최근 100건, 상대 시각 표시
+- **PWA 인프라** — manifest.webmanifest + Service Worker (네트워크 우선 + 캐시 폴백)
+- **PWA Shortcuts** — `?tab=scan` / `?tab=margin` 진입
+- 아이콘 SVG (검정 배경 + 바코드 + "번장")
 
-### ⚠️ Mock / 가짜 동작
-- AI 추천 → 하드코딩 5개 상품명 + aiInputs 기반 템플릿 설명 (Phase 2에서 Gemini API 연결)
-- 모바일 바코드 스캔 → setTimeout 시뮬레이션
-- 모바일 사진 → SVG 패턴 placeholder
-- 이미지 자동입력 → "Phase 2 구현 예정" 메시지 반환
+### ✅ 인프라
+- `vercel.json` — PWA Vercel 배포 설정 (헤더, SPA fallback, 캐시 정책)
+- `vite.mobile.config.ts` — `publicDir: src/mobile/public/` (manifest/sw/icons 자동 복사)
+- `manifest.json` host_permissions에 `frankfurter.dev/.app` 추가
 
-### ❌ 아예 없음
-- Gemini API 실제 호출
-- 이미지 드래그앤드롭 + IndexedDB 저장
-- 입력값 chrome.storage 영속화 (자동 저장)
-- 실제 카메라 (`getUserMedia`)
-- ZXing 바코드 인식
-- 메루카리 검색 연결
-- PWA 매니페스트 (홈 화면 추가)
-- 확장 아이콘 PNG
-- API 키 입력 UI
-- 사용자 정의 템플릿 추가/수정/삭제
+### ⏳ 다음 작업 (Phase 6+)
+- 확장 아이콘 PNG (16/48/128) + Chrome Web Store 등록
+- Vercel 영구 배포
+- Supabase 백엔드 (인증 + 태스크 큐 + Storage + Realtime)
+- PWA→확장 사진+텍스트 전달 (큐 시스템)
+- PWA 멀티 검색 버튼 (번장/당근/쿠팡)
+- 카카오 OAuth + 포트원 결제 (PMF 검증 후)
 
 ---
 
-## 9. 작업 우선순위 (다음 에이전트가 따라갈 순서)
+## 9. 작업 로드맵
 
-### ~~Phase 1 — 핵심 통신~~ ✅ 완료 (2026-04-23)
-~~1. **`src/lib/types.ts`** 생성~~
-~~2. **`src/lib/messaging.ts`** — 타입 안전 메시지 헬퍼~~
-~~3. **`src/lib/storage.ts`** — chrome.storage 래퍼~~
-~~4. **Content script 실제 구현** (SELECTORS 검증 포함)~~
-~~5. **Background SW 메시지 라우팅**~~
-~~6. **SidePanel "자동입력" 버튼 실제 연결**~~
-~~7. **진단 섹션 실데이터 표시**~~
+### ✅ 완료된 페이즈
 
-### Phase 2 — 폼 영속화 + AI
-8. **`src/lib/gemini.ts`** — Gemini API 클라이언트 + 프롬프트
-9. **AI 섹션 실제 호출 연결** (mock 제거)
-10. **API 키 입력 UI** (설정 패널 신규 구현 필요)
-11. **chrome.storage 자동 저장** (디바운스 500ms)
-12. **이미지 드래그앤드롭 + 리사이즈 + IndexedDB**
+| 페이즈 | 내용 | 완료일 |
+|--------|------|--------|
+| Phase 1 | 핵심 통신 (types/messaging/storage/content/background/sidepanel) | 2026-04-23 |
+| Phase 2 | Gemini AI 통합 + IndexedDB 이미지 + chrome.storage 영속화 | 2026-04-25 |
+| Phase 3 | UX 정리 + 카테고리 자동선택 + 환율 인라인 편집 + 템플릿 사용자 정의 + 최근 등록 이력 | 2026-04-26 |
+| Phase 4 | 통화 셀렉터 (USD/JPY/KRW) + Frankfurter 자동 환율 + 사이즈 picker cloak | 2026-04-27 |
+| Phase 5 | 모바일 PWA 실기능 (카메라+ZXing+메루카리+manifest+SW+이력) | 2026-04-27 |
 
-### Phase 3 — UX 정리 + 강화
+### Phase 6 — 배포 인프라 (지금 진행 중)
+**목표**: 영구 URL로 PWA 노출 + 자동 배포 파이프라인
 
-**A. UX 위치 재배치 (Phase 2 회고에서 발견)**
-13. **`+ 새 상품` 버튼** — 메인 actionbar 우측에 추가
-    - 클릭 시 현재 draft + IndexedDB 이미지 일괄 삭제 후 빈 폼으로 시작
-    - 확인 다이얼로그 (입력값 있을 때만)
-    - 현재 설정 모달의 "초안 관리" 섹션 제거 (거기 묻혀 있어서 발견 어려움)
-14. **환율 인라인 편집** — 마진 계산 섹션 헤더 또는 행에서 직접 수정
-    - 환율은 매일 바뀌는데 설정 4단계 진입은 불편
-    - 클릭 → 인라인 input → blur 시 저장
-    - 설정 모달에서는 환율 제거
-15. **설정 모달 정리** — 배송비/수수료만 남김 (정말 안 바뀌는 값)
+- 변경사항 commit & push → PR
+- Vercel GitHub 연동 → PWA 영구 URL 발급 (`vercel.json` 이미 작성됨)
+- Chrome Web Store 베타 리스팅
+  - 확장 아이콘 PNG (16/48/128) 제작
+  - 스크린샷 + 설명문 작성
 
-**B. 상태 표시 / 피드백**
-16. **상태 스트립** — `chrome.tabs.onUpdated`로 활성 URL 실시간 갱신
-17. **토스트/로딩 상태** 개선 — 긴 작업(AI 생성) 진행률, 에러 시 액션 버튼
+**산출물**: PWA 영구 URL + 확장 베타 출시
 
-**C. 템플릿 기능 결정**
-18. **템플릿 정리/제거 결정** — AI가 설명을 잘 쓰면 템플릿이 잉여
-    - 옵션 a: 완전 제거 (UI + 단축키 + 사용자 정의 모두)
-    - 옵션 b: "AI 설명 뒤에 자동 부착되는 고정 푸터" 형태로 1~2개만 남김 (예: 배송 안내, 반품 정책)
-    - 옵션 c: 그대로 유지하고 `Alt+1~9` 단축키 + 사용자 정의 추가/수정/삭제 완성
-    - **결정 후 진행** — 사용자 피드백 보고 정함
+---
 
-**D. 기록**
-19. **최근 등록 이력** — chrome.storage `history` 키에 저장 + 사이드패널에 렌더 (현재 placeholder)
-20. **이력 → 복제** 버튼 — 과거 상품 정보를 새 draft로 복사
+### Phase 7 — 백엔드 + 큐 코어 (Supabase)
+**목표**: 현장 → 사무실 태스크 전달 워크플로 동작
 
-**E. AI 비용 / 배포 전략 결정 (Phase 5와 연동)**
-21. **API 키 전달 방식 결정** — 다음 3가지 중 택1 (또는 단계적):
-    - **옵션 1 (현재)**: 사용자 본인 키 입력 — Web Store 통과 쉬움, 진입 장벽 있음
-    - **옵션 4 (하이브리드)**: 본인 운영 Cloudflare Workers 프록시 + "내 키 쓰기" 토글
-      - 비기술 사용자 진입 장벽 0
-      - 어뷰징 방어: device-level rate limit (일 50회) + extension ID 검증
-      - 비용: 사용자 1,000명 규모까지 인프라 거의 0원, Gemini 호출 비용만 ~$30/월
-    - **옵션 구독**: Google OAuth + 포트원 결제 + Free(일 5회) / Pro(9,900원/월)
-      - 인프라: Supabase + CF Workers + 포트원
-      - 법적: 사업자등록 + 통신판매업 신고 + 약관/개인정보 처리방침
-      - 개발 공수: 10~13일
-      - **PMF 검증 후 진행** (지금은 too early)
-    - **권장 로드맵**: 베타(옵션 1) → 검증 후 하이브리드 → PMF 시 구독
+#### 7.1 인프라 셋업
+- Supabase 프로젝트 (Tokyo region)
+- 스키마: `workspaces` / `workspace_members` / `product_tasks` / Storage 버킷 `task-photos`
+- pg_cron으로 3일 후 자동 삭제
 
-### Phase 4 — 모바일 PWA
-18. **`getUserMedia` + 비디오 스트림**
-19. **ZXing 통합** (`@zxing/library` 추가)
-20. **메루카리 검색 URL 생성 + 새 탭**
-21. **사진 촬영 + 리사이즈 + 다운로드**
-22. **localStorage 기록 저장**
-23. **`manifest.webmanifest` + 아이콘**
+#### 7.2 백엔드 추상화 레이어 (portable 설계)
+```
+src/lib/backend/
+  ├─ index.ts          # 인터페이스만 export (Backend 인터페이스)
+  ├─ supabase.ts       # 현재 구현
+  └─ (future) firebase.ts / api.ts ...
+```
 
-### Phase 5 — 배포 준비
-24. **확장 아이콘 PNG** (16/48/128)
-25. **README 사용자용 가이드** (수강생 대상)
-26. **Chrome Web Store 등록 또는 zip 배포**
-27. **간단한 버그 리포트 폼** (Google Form 등)
+원칙:
+- 표준 SQL + S3 호환 API만 사용 (락인 최소화)
+- Realtime은 옵션 (폴링 폴백)
+- JWT는 표준 토큰
+
+#### 7.3 인증
+- 매직링크 로그인 (이메일) — 양쪽(PWA·확장)
+- JWT 토큰 chrome.storage / localStorage 보관
+
+#### 7.4 PWA 측
+- "📤 사무실로 보내기" 버튼 → 사진 Storage 업로드 → DB insert
+- "내 보낸 큐" 탭 — 본인 태스크 상태 (대기/처리중/완료/거절)
+
+#### 7.5 확장 측
+- 사이드패널 상단 로그인 섹션
+- "📥 받은 큐" 섹션 — Realtime 알림 + 배지
+- 클릭 → "받기" → status='in_progress' (락) → 폼 자동 채움 + 사진 IndexedDB로 다운로드
+- 자동입력 → "✅ 완료 처리" → DB row 닫고 사진 즉시 삭제
+
+#### 7.6 데이터 보관 정책 (Transient Queue)
+- 백엔드: 처리 중인 태스크만 (3일 후 자동 삭제)
+- 사진: 처리 완료 시 즉시 Storage에서 삭제
+- 이력: 양쪽 로컬에만 영구 보관 (chrome.storage / localStorage)
+
+**무료 한도 분석**: 하루 100건 처리 시 Free 충분. 그 이상 Pro $25/월.
+
+---
+
+### Phase 8 — 운영 기능 강화
+**목표**: 실제 셀러가 매일 쓸 만한 완성도
+
+- PWA 멀티 검색 버튼 (번장/당근/쿠팡/메루카리) + 검색어 직접 편집
+- 태스크 거절/재할당
+- 본인 보낸 큐 상태 보기
+- 알림 (Notification API)
+- 통계 대시보드 (일별 처리량)
+- 다중 워크스페이스 (베타 피드백에서 필요하다고 나오면)
+
+---
+
+### Phase 9 — 베타 + 운영 안정화
+**목표**: 실사용 피드백 수집 + PMF 검증
+
+- 베타 테스터 5~10명 모집 (한국 셀러 커뮤니티)
+- 사용 패턴 모니터링 (Supabase 대시보드 + 인터뷰)
+- 버그 픽스 + UX 개선 (피드백 우선순위)
+- Chrome Web Store 정식 출시
+- 50명+ 도달, MAU 데이터 수집
+
+---
+
+### Phase 10 — 수익화 (PMF 확인 후)
+**목표**: 지속 가능한 비즈니스 모델
+
+- 카카오 OAuth (한국인 친화적)
+- 포트원 결제 + 월 구독
+- Free / Pro 한도 분리 (Free: 100태스크/월, Pro: 무제한)
+- 결제 페이지 + 영수증
+- 사용량 대시보드
+- 사업자등록 + 통신판매업 신고 + 약관/개인정보 처리방침
+
+---
+
+## 9.1. 백엔드 선택 근거 (Supabase)
+
+### 왜 Supabase인가
+- **풀 매니지드**: DB(Postgres) + Auth + Storage(S3 호환) + Realtime 한 번에
+- **무료 한도 충분**: 500MB DB, 1GB Storage, 50K MAU, 200 동시 Realtime
+- **portable**: 표준 PostgreSQL + S3 API → 갈아타기 쉬움 (Neon/RDS/R2 등)
+- **Tokyo region**: 한국에서 ping 30~40ms
+
+### 갈아타기 시나리오 (마이그레이션 프루프)
+| 규모 | Supabase 비용 | 권장 |
+|------|-------------|------|
+| ~1TB | $44/월 | 그대로 |
+| ~3TB | $86/월 | 그대로 (12만 원, 비즈니스 규모면 미미) |
+| ~10TB | $233/월 | Storage만 R2로 분리 검토 |
+| ~100TB | $2,200/월 | 본격 하이브리드 |
+| 1PB+ | — | 자체 인프라 |
+
+→ 처음부터 백엔드 추상화 레이어만 잘 깔아두면 어떤 시점에서든 부분 이전 가능.
+
+### 데이터 모델 스케치
+```sql
+workspaces (id, name, owner_id, created_at)
+workspace_members (workspace_id, user_id, role: owner|field|office)
+product_tasks (
+  id, workspace_id,
+  status: draft|ready|in_progress|done|rejected,
+  created_by, assigned_to,
+  barcode, title, brand, model,
+  cost, cost_currency, price, price_currency,
+  notes, photo_paths text[],
+  source: field|office|manual,
+  created_at, started_at, completed_at
+)
+-- Storage: task-photos/<workspace_id>/<task_id>/<n>.jpg
+```
+
+---
+
+## 9.2. PWA→확장 데이터 전송 방식 결정사항
+
+검토한 옵션들:
+| 방식 | 백엔드 | 사진 | 비동기 | 결정 |
+|------|------|------|------|------|
+| URL 딥링크 | X | ❌ (URL 길이 한계) | ✅ | 보조용 |
+| 클립보드 | X | ❌ | ✅ | 보조용 |
+| WebRTC P2P | 거의 X | ✅ | ❌ (양쪽 동시 온라인) | 미채택 |
+| 구글 드라이브 | X (사용자 클라우드) | ✅ | ✅ | 셋업 복잡, 미채택 |
+| **Supabase 큐** | ✅ (매니지드) | ✅ | ✅ | **채택** |
+
+이유: 사진 + 비동기 + 멀티 사용자를 동시에 만족하는 유일한 옵션.
 
 ---
 

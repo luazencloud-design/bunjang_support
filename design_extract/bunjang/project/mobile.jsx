@@ -502,7 +502,7 @@ function MobilePWA({ tweaks }){
               {[
                 ['원가 (환율 9.3원/엔)', Math.round(margin.cost).toLocaleString() + '원'],
                 ['배송비', '3,500원'],
-                ['수수료 (3%)', Math.round(margin.fee).toLocaleString() + '원'],
+                ['수수료 (6%)', Math.round(margin.fee).toLocaleString() + '원'],
               ].map(([k,v], i)=>(
                 <div key={i} style={{
                   display:'flex', justifyContent:'space-between',

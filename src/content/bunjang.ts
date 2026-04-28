@@ -5,6 +5,7 @@
 //   3. setNativeValue()로 React 호환 값 주입
 //   4. 이미지 DataTransfer 주입
 //   5. 필드별 성공/실패 결과를 sendResponse로 반환
+//   6. URL ?bjh_prefill= 감지 → background → sidepanel로 전달 (모바일 PWA → PC 브릿지)
 
 import type {
   ExtMessage,
@@ -13,9 +14,49 @@ import type {
   CategoryTreeNode,
   CategoryOptionGroup,
   InjectImageData,
+  PrefillPayload,
 } from '../lib/types';
 import { isExtMessage } from '../lib/messaging';
 import { loadImageAsFile } from '../lib/images';
+
+// ────────────────────────────────────────────────────────────────────
+// URL prefill 핸들러 — 모바일 PWA에서 보낸 ?bjh_prefill=<base64> 감지
+// 페이지 로드 시 1회 + 페이지 navigation 후에도 재확인 (SPA)
+// ────────────────────────────────────────────────────────────────────
+function checkPrefillFromUrl(): void {
+  try {
+    const url = new URL(location.href);
+    const raw = url.searchParams.get('bjh_prefill');
+    if (!raw) return;
+
+    let data: PrefillPayload;
+    try {
+      const json = decodeURIComponent(escape(atob(raw)));
+      data = JSON.parse(json) as PrefillPayload;
+    } catch (e) {
+      console.warn('[bunjang-helper] bjh_prefill 파싱 실패:', e);
+      return;
+    }
+
+    if (!data || data.v !== 1) {
+      console.warn('[bunjang-helper] 알 수 없는 prefill 스키마 버전:', data);
+      return;
+    }
+
+    console.log('[bunjang-helper] prefill 감지 — sidepanel로 전달:', data);
+    chrome.runtime.sendMessage({ type: 'prefill', data } satisfies ExtMessage)
+      .catch(() => {/* sidepanel 닫혀 있으면 background가 받음 */});
+
+    // URL에서 파라미터 제거 (새로고침 시 중복 전달 방지)
+    url.searchParams.delete('bjh_prefill');
+    history.replaceState({}, '', url.pathname + (url.search ? url.search : '') + url.hash);
+  } catch (e) {
+    console.warn('[bunjang-helper] checkPrefillFromUrl 실패:', e);
+  }
+}
+
+// 페이지 로드 시 즉시 체크
+checkPrefillFromUrl();
 
 // ────────────────────────────────────────────────────────────────────
 // base64 dataURL → File (sidepanel에서 직렬화한 이미지 복원)

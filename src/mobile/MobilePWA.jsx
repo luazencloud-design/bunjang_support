@@ -674,32 +674,46 @@ function MobilePWA({ tweaks }){
         setCostCurrency(info.currency);
       }
 
-      // ── 검색어 자동 채움 — 제품명(model) 확보가 핵심 ──
+      // ── 검색어 자동 채움 ──
+      // 핵심: SKU(modelCode)가 있으면 model 있어도 항상 lookup 실행
+      // 이유: 같은 제품군이라도 SKU별로 색상/에디션이 다 달라서
+      //   "Nike Daybreak"로만 검색하면 수십 종 섞임 →
+      //   "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지" 같은 풀네임 필요
       const hasModel = info.model && info.brand && info.model.toLowerCase() !== info.brand.toLowerCase();
 
+      // 1단계: 즉시 표시할 임시 검색어 (lookup 결과 오기 전)
+      let initial = '';
       if (info.brand && hasModel) {
-        // 1순위: brand + model — 가장 좋음
-        const composed = `${info.brand} ${info.model}`.trim();
-        setSearchQuery(composed);
-        saveJson(LS_KEY_LAST_QUERY, composed);
-        showToast(`택 분석 완료 — ${composed}`);
-        if (navigator.vibrate) navigator.vibrate(60);
+        initial = `${info.brand} ${info.model}`.trim();
       } else if (info.brand && info.modelCode) {
-        // 2순위: model 못 얻었지만 SKU 있음 → 우선 brand+SKU로 채워두고
-        // 백그라운드에서 SKU → Google 검색으로 한국어 풀네임 조회 (색상/에디션 포함)
-        const fallback = `${info.brand} ${info.modelCode}`.trim();
-        setSearchQuery(fallback);
-        saveJson(LS_KEY_LAST_QUERY, fallback);
-        showToast(`택 분석 — 제품명 자동 조회 중...`);
+        initial = `${info.brand} ${info.modelCode}`.trim();
+      } else if (info.brand) {
+        initial = info.brand.trim();
+      } else if (info.modelCode) {
+        initial = info.modelCode.trim();
+      }
+      if (initial) {
+        setSearchQuery(initial);
+        saveJson(LS_KEY_LAST_QUERY, initial);
+      }
+
+      // 2단계: SKU 있으면 무조건 백그라운드 lookup으로 풀네임 보강
+      if (info.brand && info.modelCode) {
+        showToast(hasModel
+          ? `택 분석 완료 — ${initial} (색상 정보 추가 조회 중...)`
+          : `택 분석 — 제품명 자동 조회 중...`);
         if (navigator.vibrate) navigator.vibrate(60);
         setLookupLoading(true);
         lookupProductName(info.brand, info.modelCode, settings.geminiApiKey)
           .then((lookup) => {
             if (!lookup || !lookup.fullName) return;
+            // OCR이 알려준 model보다 lookup의 fullName이 더 상세 (색상 포함) → 교체
             setSearchQuery(lookup.fullName);
             saveJson(LS_KEY_LAST_QUERY, lookup.fullName);
             setTagInfo((prev) => prev ? {
               ...prev,
+              // OCR model("Daybreak")보다 lookup shortName("데이브레이크")이 한국어로 더 좋음
+              // shortName 없으면 fullName 그대로
               model: lookup.shortName || lookup.fullName,
               color: prev.color || lookup.colorway,
               fullName: lookup.fullName,
@@ -708,16 +722,14 @@ function MobilePWA({ tweaks }){
           })
           .catch((err) => console.warn('[lookupProductName] 실패:', err))
           .finally(() => setLookupLoading(false));
-      } else if (info.brand) {
-        setSearchQuery(info.brand);
-        saveJson(LS_KEY_LAST_QUERY, info.brand);
-        showToast(`택 분석 완료 — ${info.brand} (제품명 직접 입력 권장)`);
-      } else if (info.modelCode) {
-        setSearchQuery(info.modelCode);
-        saveJson(LS_KEY_LAST_QUERY, info.modelCode);
-        showToast(`택 분석 완료 — ${info.modelCode}`);
       } else {
-        showToast(`택 분석 완료 — 결과 확인`);
+        // SKU 없는 경우 — lookup 불가, OCR 결과 그대로 사용
+        if (initial) {
+          showToast(`택 분석 완료 — ${initial}${!hasModel ? ' (제품명 직접 입력 권장)' : ''}`);
+          if (navigator.vibrate) navigator.vibrate(60);
+        } else {
+          showToast(`택 분석 완료 — 결과 확인`);
+        }
       }
     } catch (e) {
       const msg = e?.message || String(e);

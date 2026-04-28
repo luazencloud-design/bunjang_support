@@ -472,10 +472,21 @@ export interface PriceQuote {
   recency?: string; // '최근 7일' / '최근 30일' / '판매중' 등
 }
 
+export interface GroundingSource {
+  title: string;       // 페이지 제목 (사용자가 식별 가능)
+  uri: string;         // grounding URI (Vertex 리다이렉트 — 곧 만료될 수 있음)
+}
+
 export interface PriceSearchResult {
   query: string;
   quotes: PriceQuote[];
-  sources: string[]; // grounding sources URL 목록
+  sources: GroundingSource[]; // grounding sources (title + URI)
+}
+
+// Vertex grounding 리다이렉트는 토큰 수명이 짧고 자주 404 발생.
+// 사용자가 클릭해도 실제 페이지 못 봄 → 구글 검색으로 폴백.
+function isVertexRedirect(url: string): boolean {
+  return url.includes('vertexaisearch.cloud.google.com/grounding-api-redirect');
 }
 
 /**
@@ -602,11 +613,23 @@ ${query}
     });
   }
 
-  // grounding sources 추출
+  // grounding sources 추출 — title + uri 모두 수집
+  // (Vertex 리다이렉트 URI는 자주 만료되므로 사용자에겐 title 위주로 표시)
   const chunks = data?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-  const sources = chunks
-    .map(c => c.web?.uri)
-    .filter((u): u is string => typeof u === 'string');
+  const sources: GroundingSource[] = chunks
+    .map(c => ({
+      title: typeof c.web?.title === 'string' ? c.web.title : '',
+      uri: typeof c.web?.uri === 'string' ? c.web.uri : '',
+    }))
+    .filter(s => s.title || s.uri);
+
+  // quote.url에 Vertex 리다이렉트가 있으면 제거 (사용자에게 404만 보여주는 꼴)
+  // → undefined로 두면 PWA가 카드 클릭 비활성화
+  for (const q of quotes) {
+    if (q.url && isVertexRedirect(q.url)) {
+      q.url = undefined;
+    }
+  }
 
   return { query, quotes, sources };
 }

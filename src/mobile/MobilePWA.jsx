@@ -561,15 +561,16 @@ function MobilePWA({ tweaks }){
       const info = await extractFromTagImage(blob, settings.geminiApiKey);
       setTagInfo(info);
       // 검색어를 자동으로 "브랜드 + 모델"로 채우기
-      // 검색어 우선순위 — 더 구체적일수록 정확한 검색 결과:
-      //   1. brand + model + modelCode  (가장 구체적, 정확한 SKU 매칭)
-      //   2. brand + model               (model code 없으면)
-      //   3. brand + modelCode           (model 텍스트는 없는데 코드만 있을 때)
-      //   4. brand 단독                  (마지막 수단)
-      const parts = [info.brand, info.model, info.modelCode]
+      // 검색어 자동 채움 — 제품명(brand + model) 우선
+      // modelCode(SKU)는 너무 구체적이라 시세 검색 결과가 좁아짐 → searchQuery에는 안 넣음
+      // (modelCode는 결과 카드 칩으로만 표시, 사용자가 필요시 검색어에 직접 추가)
+      const parts = [info.brand, info.model]
         .filter(Boolean)
-        .filter((v, i, arr) => arr.indexOf(v) === i); // dedupe
-      const composed = parts.join(' ').trim();
+        .filter((v, i, arr) => arr.indexOf(v) === i);
+      // brand+model 둘 다 없을 때만 modelCode를 마지막 수단으로
+      const composed = parts.length > 0
+        ? parts.join(' ').trim()
+        : (info.modelCode || '').trim();
       if (composed) {
         setSearchQuery(composed);
         saveJson(LS_KEY_LAST_QUERY, composed);
@@ -712,6 +713,37 @@ function MobilePWA({ tweaks }){
       showToast('URL 복사됨 — PC에 붙여넣어 열기');
     } catch {
       showToast('복사 실패 — URL: ' + text.slice(0, 50) + '...');
+    }
+  }
+
+  // ── JSON만 복사 — 수동으로 보내고 싶거나 다른 도구에 붙여넣을 때 ──
+  async function handleCopyJson() {
+    const payload = {
+      v: 1,
+      title: tagInfo
+        ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim()
+        : (searchQuery || ''),
+      brand: tagInfo?.brand,
+      model: tagInfo?.model,
+      modelCode: tagInfo?.modelCode,
+      feature: [tagInfo?.size && `사이즈 ${tagInfo.size}`, tagInfo?.color]
+        .filter(Boolean).join(', ') || undefined,
+      cost: cost || tagInfo?.price || undefined,
+      costCurrency: cost || tagInfo?.price ? (costCurrency || tagInfo?.currency || 'KRW') : undefined,
+      price: price || undefined,
+      priceCurrency: price ? 'KRW' : undefined,
+      photoCount: photos.length || undefined,
+    };
+    // undefined 키 제거
+    const cleaned = Object.fromEntries(
+      Object.entries(payload).filter(([_, v]) => v !== undefined && v !== '')
+    );
+    const json = JSON.stringify(cleaned, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      showToast('JSON 복사됨');
+    } catch {
+      showToast('복사 실패');
     }
   }
 
@@ -940,9 +972,15 @@ function MobilePWA({ tweaks }){
                     <div style={{display:'flex', flexDirection:'column', gap:6}}>
                       {priceSearch.quotes.map((q, i) => (
                         <a key={i}
-                          href={q.url || '#'}
-                          target={q.url ? '_blank' : undefined}
+                          href={
+                            q.url
+                              ? q.url
+                              // Vertex URL은 이미 라이브러리에서 제거됨 → q.title이 있으면 마켓플레이스 + 제목으로 Google 검색 fallback
+                              : `https://www.google.com/search?q=${encodeURIComponent((q.title || searchQuery) + ' ' + q.marketplace)}`
+                          }
+                          target="_blank"
                           rel="noopener"
+                          title={q.url ? '실제 listing 열기' : '제목 + 마켓플레이스로 Google 검색'}
                           style={{
                             display:'flex', alignItems:'center', gap:8,
                             padding:'10px 12px', borderRadius:10,
@@ -978,18 +1016,29 @@ function MobilePWA({ tweaks }){
                     {priceSearch.sources.length > 0 && (
                       <details style={{marginTop:6}}>
                         <summary style={{fontSize:10.5, color:'var(--ink-3)', cursor:'pointer'}}>
-                          출처 {priceSearch.sources.length}건 (Google 검색)
+                          출처 {priceSearch.sources.length}건
                         </summary>
-                        <ul style={{fontSize:10, color:'var(--ink-3)', marginTop:4, paddingLeft:16}}>
-                          {priceSearch.sources.slice(0, 8).map((s, i) => (
-                            <li key={i} style={{marginBottom:2}}>
-                              <a href={s} target="_blank" rel="noopener"
-                                style={{color:'var(--ink-3)', wordBreak:'break-all'}}>
-                                {s.length > 60 ? s.slice(0, 60) + '...' : s}
-                              </a>
-                            </li>
-                          ))}
-                        </ul>
+                        <div style={{fontSize:10.5, color:'var(--ink-3)', marginTop:6, lineHeight:1.6}}>
+                          {/* Vertex grounding URI는 자주 만료되어 404 → 제목으로 Google 검색 fallback */}
+                          {priceSearch.sources.slice(0, 8).map((s, i) => {
+                            const text = s.title || s.uri;
+                            const fallbackHref = s.title
+                              ? `https://www.google.com/search?q=${encodeURIComponent(s.title)}`
+                              : s.uri;
+                            return (
+                              <div key={i} style={{marginBottom:4}}>
+                                <a href={fallbackHref} target="_blank" rel="noopener"
+                                  title="제목으로 Google 재검색 (grounding URL은 자주 만료됨)"
+                                  style={{color:'var(--ink-2)', wordBreak:'break-word', textDecoration:'none'}}>
+                                  · {text.length > 70 ? text.slice(0, 70) + '...' : text}
+                                </a>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{fontSize:9.5, color:'var(--ink-3)', marginTop:6, opacity:.7}}>
+                          ⓘ grounding URL은 짧게 만료됨 — 제목으로 Google 재검색
+                        </div>
                       </details>
                     )}
                   </div>
@@ -1019,10 +1068,51 @@ function MobilePWA({ tweaks }){
                 </details>
 
                 {/* 액션 버튼들 */}
+                {/* 보낼 정보 미리보기 — 사용자가 뭘 보내는지 명확히 확인 */}
+                {(tagInfo || searchQuery || cost || price) && (
+                  <details style={{marginBottom:8}} open>
+                    <summary style={{
+                      fontSize:10.5, fontWeight:700, color:'var(--ink-3)',
+                      textTransform:'uppercase', letterSpacing:'.08em', cursor:'pointer',
+                      marginBottom:6,
+                    }}>
+                      📋 PC로 보낼 정보
+                    </summary>
+                    <div style={{
+                      background:'var(--chip)', borderRadius:8, padding:'10px 12px',
+                      fontSize:11.5, color:'var(--ink-2)', lineHeight:1.6,
+                    }}>
+                      {(() => {
+                        const sym = costCurrency === 'KRW' ? '₩' : costCurrency === 'JPY' ? '¥' : '$';
+                        const rows = [
+                          ['제목', tagInfo ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ') : searchQuery],
+                          ['브랜드', tagInfo?.brand],
+                          ['모델', tagInfo?.model],
+                          ['모델코드', tagInfo?.modelCode],
+                          ['특징', [tagInfo?.size && `사이즈 ${tagInfo.size}`, tagInfo?.color].filter(Boolean).join(', ')],
+                          ['원가', cost > 0 ? `${sym}${cost.toLocaleString()}` : null],
+                          ['판매가', price > 0 ? `₩${price.toLocaleString()}` : null],
+                          ['사진', photos.length > 0 ? `${photos.length}장` : null],
+                        ].filter(([_, v]) => v);
+                        return rows.map(([k, v]) => (
+                          <div key={k} style={{display:'flex', gap:8}}>
+                            <span style={{color:'var(--ink-3)', minWidth:50}}>{k}:</span>
+                            <span style={{flex:1, wordBreak:'break-all'}}>{v}</span>
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  </details>
+                )}
+
                 <div className="m-action-row" style={{marginBottom:0}}>
                   <button className="m-btn accent" onClick={handleSendToExtension}
-                    title="확장(PC)으로 정보 전달 — 카톡으로 본인에게 보내거나 클립보드로 복사">
+                    title="확장(PC)으로 자동 입력 링크 + 사진 공유 — 카톡/AirDrop으로 본인에게">
                     <MIcon.download s={14}/> PC로 보내기
+                  </button>
+                  <button className="m-btn" onClick={handleCopyJson}
+                    title="JSON 데이터를 클립보드에 복사 (수동 사용용)">
+                    📋 JSON
                   </button>
                   <button className="m-btn primary" onClick={jumpToMargin}>
                     ₩ 마진
@@ -1112,6 +1202,34 @@ function MobilePWA({ tweaks }){
             }}>
               💡 [PC로 보내기]를 누르면 카톡·에어드롭 등으로 사진과 URL을 함께 공유합니다 (지원 환경에서).
               미지원이면 다운로드 후 직접 옮기세요.
+            </div>
+
+            {/* Gemini API 키 — 항상 노출 (택 분석/시세 조사에 필요) */}
+            <div className="m-section-title" style={{marginTop:18}}>
+              <span>Gemini API 키</span>
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener"
+                style={{fontSize:10, color:'var(--accent)', textDecoration:'none', fontWeight:600}}>
+                무료 발급 →
+              </a>
+            </div>
+            <div className="m-card" style={{padding:'12px 14px'}}>
+              <label style={{fontSize:11, color:'var(--ink-3)', display:'block', marginBottom:6}}>
+                택 OCR + 시세 조사에 필요. 무료 1,500회/일.
+              </label>
+              <div className="m-num">
+                <input
+                  type="password"
+                  placeholder="AIza..."
+                  value={settings.geminiApiKey || ''}
+                  onChange={e => setSettings(s => ({...s, geminiApiKey: e.target.value}))}
+                  style={{fontSize:13, fontFamily:'JetBrains Mono, monospace'}}
+                />
+              </div>
+              {settings.geminiApiKey && (
+                <div style={{fontSize:10, color:'var(--success)', marginTop:6}}>
+                  ✓ 키 저장됨 ({settings.geminiApiKey.length}자)
+                </div>
+              )}
             </div>
           </>
         )}
@@ -1229,35 +1347,7 @@ function MobilePWA({ tweaks }){
               </div>
             </div>
 
-            {/* Gemini API 키 — 택 OCR용 */}
-            <div className="m-section-title" style={{marginTop:18}}>
-              <span>Gemini API 키 (택 OCR)</span>
-              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener"
-                style={{fontSize:10, color:'var(--accent)', textDecoration:'none', fontWeight:600}}>
-                무료 발급 →
-              </a>
-            </div>
-            <div className="m-card" style={{padding:'12px 14px'}}>
-              <div className="m-field" style={{marginBottom:0}}>
-                <label style={{fontSize:11, color:'var(--ink-3)'}}>
-                  사진 OCR로 상품 정보 자동 추출 시 사용. 무료 1,500회/일.
-                </label>
-                <div className="m-num" style={{marginTop:6}}>
-                  <input
-                    type="password"
-                    placeholder="AIza..."
-                    value={settings.geminiApiKey || ''}
-                    onChange={e => setSettings(s => ({...s, geminiApiKey: e.target.value}))}
-                    style={{fontSize:13, fontFamily:'JetBrains Mono, monospace'}}
-                  />
-                </div>
-                {settings.geminiApiKey && (
-                  <div style={{fontSize:10, color:'var(--success)', marginTop:6}}>
-                    ✓ 키 저장됨 ({settings.geminiApiKey.length}자) — 스캔 탭의 📷 버튼으로 택 분석 가능
-                  </div>
-                )}
-              </div>
-            </div>
+            {/* Gemini API 키는 스캔 탭 아래쪽으로 이동 (자주 보는 화면이라 접근성 ↑) */}
           </>
         )}
 

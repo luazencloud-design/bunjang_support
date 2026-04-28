@@ -406,13 +406,13 @@ function MobilePWA({ tweaks }){
   useEffect(() => { saveJson(LS_KEY_FXMETA, fxMeta); }, [fxMeta]);
   useEffect(() => { saveJson(LS_KEY_HISTORY, history); }, [history]);
 
-  // 카메라 강제 재시작용 카운터 — restartCounter 증가 시 useEffect 재실행
+  // 카메라 자동 재시도 카운터 (검은화면 감지 시 자동 증가, 최대 3회)
   const [restartCounter, setRestartCounter] = useState(0);
+  const retryCountRef = useRef(0);
 
   // ─── 카메라 라이프사이클 ───
   // 'scan' 탭 + facingMode/restartCounter 변경 시 카메라 (재)시작.
   // 다른 탭 가면 즉시 정지 (배터리/프라이버시).
-  // 디코드 루프 없이 단순 라이브 프리뷰만 — [택 분석] 또는 [사진] 클릭 시 한 프레임 캡처.
   useEffect(() => {
     if (tab !== 'scan') {
       if (cameraStreamRef.current) {
@@ -420,17 +420,23 @@ function MobilePWA({ tweaks }){
         cameraStreamRef.current = null;
       }
       setCameraState('idle');
+      retryCountRef.current = 0;
       return;
     }
     let alive = true;
-    let blackScreenTimer = null;
+    let watchdogTimer = null;
+
     (async () => {
       if (!videoRef.current) return;
-      // 기존 스트림 먼저 정리 (facingMode 전환 시 충돌 방지)
+      // 기존 스트림 정리
       if (cameraStreamRef.current) {
         cameraStreamRef.current.getTracks().forEach((t) => t.stop());
         cameraStreamRef.current = null;
       }
+      // DOM 안정화 짧은 지연 (video 엘리먼트 mount 보장)
+      await new Promise((r) => setTimeout(r, 50));
+      if (!alive) return;
+
       setCameraState('permission');
       const tryGetStream = async (mode) => {
         try {
@@ -445,37 +451,55 @@ function MobilePWA({ tweaks }){
           });
         }
       };
+
       try {
         const stream = await tryGetStream(facingMode);
         if (!alive) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
+        const video = videoRef.current;
+        video.srcObject = stream;
+        await video.play().catch(() => {});
         cameraStreamRef.current = stream;
 
-        // 검은화면 자동 감지 — 1.5초 후에도 video가 프레임 안 그리면 자동 재시작
-        // (iOS Safari에서 가끔 stream은 받았는데 video가 검정인 케이스)
-        blackScreenTimer = setTimeout(() => {
+        // ── 검은화면 감지 watchdog ──
+        // 2초마다 videoWidth 체크. 0이면 재시작 (최대 3회).
+        // playing 이벤트는 신뢰성 낮아서 (iOS Safari에서 frame 없이도 fire) 안 씀
+        const checkAndStartIfReady = () => {
           if (!alive) return;
           const v = videoRef.current;
-          if (v && v.videoWidth === 0) {
-            console.warn('[camera] black screen detected, auto-restarting');
-            // 한번만 자동 재시도 (무한루프 방지)
+          if (v && v.videoWidth > 0 && v.videoHeight > 0) {
+            retryCountRef.current = 0; // 성공 → 재시도 카운트 리셋
+            setCameraState('ready');
+          } else if (retryCountRef.current < 3) {
+            // 검은화면 — 자동 재시도
+            retryCountRef.current += 1;
+            console.warn(`[camera] black screen detected (retry ${retryCountRef.current}/3)`);
             setRestartCounter((c) => c + 1);
           } else {
+            // 3회 실패 → 에러 표시
+            setCameraError('카메라가 시작되지 않습니다. 페이지를 새로고침하거나 카메라 권한을 확인하세요.');
+            setCameraState('error');
+            retryCountRef.current = 0;
+          }
+        };
+
+        // 첫 체크는 2초 후 (iOS는 첫 프레임 늦게 옴)
+        watchdogTimer = setTimeout(checkAndStartIfReady, 2000);
+
+        // 빠른 경로: video가 프레임 받자마자 ready (watchdog 대기 안 함)
+        const fastCheck = () => {
+          if (!alive) return;
+          const v = videoRef.current;
+          if (v && v.videoWidth > 0) {
+            if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+            retryCountRef.current = 0;
             setCameraState('ready');
           }
-        }, 1500);
-
-        // playing 이벤트 — 정상이면 즉시 ready로
-        const onPlaying = () => {
-          if (!alive) return;
-          if (blackScreenTimer) { clearTimeout(blackScreenTimer); blackScreenTimer = null; }
-          setCameraState('ready');
         };
-        videoRef.current.addEventListener('playing', onPlaying, { once: true });
+        video.addEventListener('loadedmetadata', fastCheck, { once: true });
+        video.addEventListener('playing', fastCheck, { once: true });
       } catch (e) {
         if (alive) {
           setCameraError(e?.message || String(e));
@@ -483,9 +507,10 @@ function MobilePWA({ tweaks }){
         }
       }
     })();
+
     return () => {
       alive = false;
-      if (blackScreenTimer) clearTimeout(blackScreenTimer);
+      if (watchdogTimer) clearTimeout(watchdogTimer);
       if (cameraStreamRef.current) {
         cameraStreamRef.current.getTracks().forEach((t) => t.stop());
         cameraStreamRef.current = null;
@@ -493,15 +518,11 @@ function MobilePWA({ tweaks }){
     };
   }, [tab, facingMode, restartCounter]);
 
-  // 카메라 전환 — facingMode state 토글 → useEffect가 알아서 재시작
+  // 카메라 전환 — facingMode 토글 + 재시도 카운트 리셋
   function handleSwitchCamera() {
+    retryCountRef.current = 0;
     setFacingMode((m) => (m === 'environment' ? 'user' : 'environment'));
     showToast(facingMode === 'environment' ? '전면 카메라' : '후면 카메라');
-  }
-  // 카메라 수동 재시작 — 검은화면일 때 사용
-  function handleRestartCamera() {
-    setRestartCounter((c) => c + 1);
-    showToast('카메라 재시작');
   }
 
   // ─── 마진 계산 ───
@@ -607,21 +628,29 @@ function MobilePWA({ tweaks }){
         if (navigator.vibrate) navigator.vibrate(60);
       } else if (info.brand && info.modelCode) {
         // 2순위: model 못 얻었지만 SKU 있음 → 우선 brand+SKU로 채워두고
-        // 백그라운드에서 SKU → 제품명 grounding 조회 (성공하면 더 좋은 검색어로 교체)
+        // 백그라운드에서 SKU → Google 검색으로 한국어 풀네임 조회 (색상/에디션 포함)
+        // 같은 데이브레이크라도 BV7725-700 = "베가스 골드 컬리지 오렌지" 식으로 SKU별 다 다름
         const fallback = `${info.brand} ${info.modelCode}`.trim();
         setSearchQuery(fallback);
         saveJson(LS_KEY_LAST_QUERY, fallback);
         showToast(`택 분석 — 제품명 자동 조회 중...`);
         if (navigator.vibrate) navigator.vibrate(60);
         lookupProductName(info.brand, info.modelCode, settings.geminiApiKey)
-          .then((productName) => {
-            if (!productName) return;
-            const better = `${info.brand} ${productName}`.trim();
-            setSearchQuery(better);
-            saveJson(LS_KEY_LAST_QUERY, better);
-            // tagInfo에도 model 채워서 결과 카드에 표시
-            setTagInfo((prev) => prev ? { ...prev, model: productName } : prev);
-            showToast(`제품명 자동 보강 — ${productName}`);
+          .then((lookup) => {
+            if (!lookup || !lookup.fullName) return;
+            // fullName은 이미 브랜드 포함된 풀네임 (예: "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지")
+            // searchQuery에 그대로 사용 (brand 중복 X)
+            setSearchQuery(lookup.fullName);
+            saveJson(LS_KEY_LAST_QUERY, lookup.fullName);
+            // tagInfo도 풀네임으로 갱신 → 결과 카드 + PC로 보낼 정보에 반영
+            setTagInfo((prev) => prev ? {
+              ...prev,
+              model: lookup.shortName || lookup.fullName,
+              color: prev.color || lookup.colorway,
+              // 풀네임을 별도 필드로 (PC 등록 시 제목으로 사용 가능)
+              fullName: lookup.fullName,
+            } : prev);
+            showToast(`제품명 보강 — ${lookup.fullName.length > 30 ? lookup.fullName.slice(0, 30) + '...' : lookup.fullName}`);
           })
           .catch((err) => console.warn('[lookupProductName] 실패:', err));
       } else if (info.brand) {
@@ -703,9 +732,12 @@ function MobilePWA({ tweaks }){
     // 페이로드 — 확장 사이드패널의 Product 형태로 매핑
     const payload = {
       v: 1, // 스키마 버전
-      title: tagInfo
-        ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim()
-        : (searchQuery || ''),
+      // 제목 우선순위: lookupProductName이 채운 fullName > brand+model > searchQuery
+      title: tagInfo?.fullName
+        ? tagInfo.fullName
+        : tagInfo
+          ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim()
+          : (searchQuery || ''),
       brand: tagInfo?.brand,
       model: tagInfo?.model,
       modelCode: tagInfo?.modelCode,
@@ -773,9 +805,12 @@ function MobilePWA({ tweaks }){
   async function handleCopyJson() {
     const payload = {
       v: 1,
-      title: tagInfo
-        ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim()
-        : (searchQuery || ''),
+      // 제목 우선순위: lookupProductName이 채운 fullName > brand+model > searchQuery
+      title: tagInfo?.fullName
+        ? tagInfo.fullName
+        : tagInfo
+          ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim()
+          : (searchQuery || ''),
       brand: tagInfo?.brand,
       model: tagInfo?.model,
       modelCode: tagInfo?.modelCode,
@@ -897,9 +932,6 @@ function MobilePWA({ tweaks }){
                     {cameraState === 'ready' ? '카메라 준비' : cameraState === 'permission' ? '권한 요청 중' : '대기'}
                   </div>
                   <div style={{display:'flex', gap:6}}>
-                    <button className="m-scan-btn" onClick={handleRestartCamera} title="카메라 재시작 (검은화면일 때)">
-                      <MIcon.refresh s={18}/>
-                    </button>
                     <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환">
                       <MIcon.flip/>
                     </button>

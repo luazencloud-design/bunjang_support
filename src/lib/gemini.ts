@@ -500,36 +500,68 @@ export async function extractFromTagImage(
 }
 
 // ────────────────────────────────────────────────────────────────────
-// SKU/모델코드로 제품명 조회 — Gemini grounding 활용
-// OCR로 model 못 얻었지만 modelCode 있을 때 자동 보강
-// 예: brand="Nike" + modelCode="CK2351-101" → "Daybreak" 반환
+// SKU/모델코드로 제품 상세명 조회 — Gemini google_search grounding 활용
+// 같은 제품군이라도 색상·에디션·연도별로 SKU가 다 달라서, 사용자가
+// 시세 검색할 땐 "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지" 같은
+// 풀네임이 필요. 이걸 Google에서 자동 조회.
+//
+// 예:
+//   Nike CK2351-101 → "나이키 데이브레이크 라이트 본"
+//   Nike BV7725-700 → "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지"
+//   Adidas FZ5057   → "아디다스 삼바 OG 화이트 블랙"
 // ────────────────────────────────────────────────────────────────────
+
+export interface ProductLookup {
+  fullName: string;       // 전체 한국어 상품명 (브랜드 포함, 색상·에디션 포함)
+  shortName?: string;     // 제품 라인명 (예: "Daybreak", "Air Force 1") — 보조용
+  colorway?: string;      // 색상/배색명 (예: "베가스 골드 컬리지 오렌지")
+  edition?: string;       // 에디션 (예: "SP", "OG", "Retro")
+}
 
 export async function lookupProductName(
   brand: string,
   modelCode: string,
   apiKey: string,
-): Promise<string | null> {
+): Promise<ProductLookup | null> {
   if (!apiKey || apiKey.trim() === '') throw new Error('GEMINI_NO_KEY');
   if (!brand || !modelCode) return null;
 
   const model = MODEL_MAP.flash;
   const url = `${BASE_URL}/${model}:generateContent?key=${apiKey}`;
 
-  const prompt = `Google 검색을 활용해 다음 SKU의 공식 제품명만 한 단어/짧은 문구로 알려주세요.
+  const prompt = `당신은 신발/패션 SKU 조회 전문가입니다.
+Google 검색으로 다음 SKU의 한국에서 통용되는 상세 상품명을 정확히 알려주세요.
 
+[조회 대상]
 브랜드: ${brand}
 SKU/모델코드: ${modelCode}
 
+[필요한 정보]
+- 제품 시리즈명 (예: 데이브레이크, 에어 포스 1, 삼바)
+- 에디션 (예: SP, OG, Retro, Low, Mid, High) — 있으면
+- 색상/배색명 (예: 베가스 골드 컬리지 오렌지, 화이트 블랙) — 있으면
+- 같은 제품군이라도 SKU별로 색상/에디션이 다르므로 정확히 조회해야 함
+
+[좋은 예]
+- Nike CK2351-101 → fullName: "나이키 데이브레이크 라이트 본"
+- Nike BV7725-700 → fullName: "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지"
+- Nike DZ5485-100 → fullName: "나이키 에어 포스 1 '07 화이트"
+- Adidas FZ5057   → fullName: "아디다스 삼바 OG 화이트 블랙"
+
 [지침]
-- 제품 라인/시리즈명만 반환 (예: "Daybreak", "Air Force 1", "Stan Smith")
-- 브랜드명("Nike", "Adidas")은 제외
-- SKU 코드는 제외
-- "Nike Air Force 1 LV8" 같은 풀네임에서 브랜드 빼고 → "Air Force 1 LV8"
-- 못 찾으면 빈 문자열 ""
+- fullName: 한국 쇼핑몰/번개장터에서 실제로 사용되는 풀네임 (브랜드 + 시리즈 + 에디션 + 색상)
+- 한국어 표기 우선 (영어밖에 못 찾으면 영어로)
+- shortName/colorway/edition은 분리 가능하면 분리, 모르면 생략
+- Google 검색 결과에 정확한 정보 없으면 빈 fullName 반환 (추측 금지)
 
 [출력 JSON]
-{ "productName": "..." }`;
+오직 JSON만 반환. 다른 텍스트 없이.
+{
+  "fullName": "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지",
+  "shortName": "데이브레이크",
+  "colorway": "베가스 골드 컬리지 오렌지",
+  "edition": "SP"
+}`;
 
   const res = await fetch(url, {
     method: 'POST',
@@ -548,7 +580,7 @@ SKU/모델코드: ${modelCode}
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
   if (!text.trim()) return null;
 
-  // JSON 추출
+  // JSON 추출 — grounding 응답은 ```json ... ``` 또는 부가 텍스트 섞임
   let jsonStr = text.trim();
   const jsonMatch = jsonStr.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
   if (jsonMatch) jsonStr = jsonMatch[1];
@@ -558,14 +590,18 @@ SKU/모델코드: ${modelCode}
     jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
   }
   try {
-    const parsed = JSON.parse(jsonStr) as { productName?: string };
-    const name = (parsed.productName || '').trim();
-    // brand가 추출 결과에 포함됐으면 제거
-    const cleaned = name.replace(new RegExp(`^${brand}\\s+`, 'i'), '').trim();
-    // 의미 있는 결과만 반환 (3자 이상, brand 자체가 아님)
-    if (cleaned.length < 2) return null;
-    if (cleaned.toLowerCase() === brand.toLowerCase()) return null;
-    return cleaned;
+    const parsed = JSON.parse(jsonStr) as Partial<ProductLookup>;
+    const fullName = (parsed.fullName || '').trim();
+    if (fullName.length < 3) return null;
+    // 결과가 brand 자체나 SKU만 반환된 경우 거부
+    if (fullName.toLowerCase() === brand.toLowerCase()) return null;
+    if (fullName.toLowerCase() === modelCode.toLowerCase()) return null;
+    return {
+      fullName,
+      shortName: typeof parsed.shortName === 'string' ? parsed.shortName.trim() || undefined : undefined,
+      colorway: typeof parsed.colorway === 'string' ? parsed.colorway.trim() || undefined : undefined,
+      edition: typeof parsed.edition === 'string' ? parsed.edition.trim() || undefined : undefined,
+    };
   } catch {
     return null;
   }

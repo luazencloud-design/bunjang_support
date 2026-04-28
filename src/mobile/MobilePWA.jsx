@@ -10,7 +10,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { fetchFxRatesIfStale, fetchFxRates } from '../lib/fx';
 import { SITES, SITE_PRESETS, openSearchTab } from '../lib/search';
-import { extractFromTagImage } from '../lib/gemini';
+import { extractFromTagImage, searchPricesViaGemini } from '../lib/gemini';
 
 // 카메라 캡처 헬퍼 — video 엘리먼트에서 한 프레임을 JPEG Blob으로
 function captureFrameToBlob(video) {
@@ -123,26 +123,7 @@ const mobileCss = `
     animation: pulse 1.4s ease-in-out infinite;
   }
   @keyframes pulse{ 50%{opacity:.4} }
-  .m-scan-frame{ position: absolute; inset: 0; display:flex; align-items:center; justify-content:center; pointer-events:none; }
-  .m-scan-window{ width: 78%; height: 30%; border-radius: 14px; box-shadow: 0 0 0 9999px rgba(0,0,0,.40); position: relative; }
-  .m-scan-window::before, .m-scan-window::after, .m-scan-window > i, .m-scan-window > b{
-    content:''; position:absolute; width: 24px; height: 24px;
-    border: 2.5px solid var(--accent);
-  }
-  .m-scan-window::before{ top:-2px; left:-2px; border-right:none; border-bottom:none; border-radius: 6px 0 0 0; }
-  .m-scan-window::after{ top:-2px; right:-2px; border-left:none; border-bottom:none; border-radius: 0 6px 0 0; }
-  .m-scan-window > i{ bottom:-2px; left:-2px; border-right:none; border-top:none; border-radius: 0 0 0 6px; }
-  .m-scan-window > b{ bottom:-2px; right:-2px; border-left:none; border-top:none; border-radius: 0 0 6px 0; }
-  .m-scan-line{
-    position:absolute; left: 5%; right: 5%; top:50%; height: 2px;
-    background: linear-gradient(to right, transparent, var(--accent), transparent);
-    animation: scan 2.4s ease-in-out infinite;
-    box-shadow: 0 0 12px var(--accent);
-  }
-  @keyframes scan{
-    0%,100%{ transform: translateY(-40%); opacity:.3 }
-    50%{ transform: translateY(40%); opacity:1 }
-  }
+  /* m-scan-frame / m-scan-window / m-scan-line 제거 (사용자 요청 — 카메라 풀뷰) */
   .m-scan-bottom{ display: flex; justify-content: center; gap: 14px; }
   .m-scan-btn{
     width: 48px; height: 48px; border-radius: 999px;
@@ -384,6 +365,10 @@ function MobilePWA({ tweaks }){
   const [tagInfo, setTagInfo] = useState(null);  // { brand, model, size, color, price, currency, ... } | null
   const [ocrLoading, setOcrLoading] = useState(false);
 
+  // 시세 조회 결과 (Gemini grounding)
+  const [priceSearch, setPriceSearch] = useState(null); // { quotes: [], sources: [] } | null
+  const [priceLoading, setPriceLoading] = useState(false);
+
   const [toast, setToast] = useState(null);
   function showToast(msg) {
     setToast(msg);
@@ -569,14 +554,22 @@ function MobilePWA({ tweaks }){
       showToast('사진 캡처 실패');
       return;
     }
-    // 캡처한 사진은 ocr 결과와 별개로 사진 목록에도 추가 (확장으로 보낼 때 사용)
-    setPhotos(prev => [...prev, blob].slice(-6));
+    // 택 분석용 사진은 등록용(photos)에 추가 X — OCR 후 그대로 폐기
+    // 등록용 사진은 별도로 [📁 사진 추가] 또는 [📷 사진] 캡처 버튼으로
     setOcrLoading(true);
     try {
       const info = await extractFromTagImage(blob, settings.geminiApiKey);
       setTagInfo(info);
       // 검색어를 자동으로 "브랜드 + 모델"로 채우기
-      const composed = [info.brand, info.model].filter(Boolean).join(' ').trim();
+      // 검색어 우선순위 — 더 구체적일수록 정확한 검색 결과:
+      //   1. brand + model + modelCode  (가장 구체적, 정확한 SKU 매칭)
+      //   2. brand + model               (model code 없으면)
+      //   3. brand + modelCode           (model 텍스트는 없는데 코드만 있을 때)
+      //   4. brand 단독                  (마지막 수단)
+      const parts = [info.brand, info.model, info.modelCode]
+        .filter(Boolean)
+        .filter((v, i, arr) => arr.indexOf(v) === i); // dedupe
+      const composed = parts.join(' ').trim();
       if (composed) {
         setSearchQuery(composed);
         saveJson(LS_KEY_LAST_QUERY, composed);
@@ -607,6 +600,37 @@ function MobilePWA({ tweaks }){
     }
     saveJson(LS_KEY_LAST_QUERY, q);
     openSearchTab(siteCode, q);
+  }
+
+  // ── 시세 조회 — Gemini의 google_search grounding으로 마켓플레이스별 가격 자동 조사 ──
+  async function handleSearchPrices() {
+    if (priceLoading) return;
+    const q = (searchQuery || '').trim();
+    if (!q) { showToast('검색어가 비어있습니다'); return; }
+    if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
+      showToast('설정에서 Gemini API 키를 입력하세요');
+      return;
+    }
+    setPriceLoading(true);
+    setPriceSearch(null);
+    try {
+      const result = await searchPricesViaGemini(q, settings.geminiApiKey);
+      setPriceSearch(result);
+      if (result.quotes.length === 0) {
+        showToast('시세를 찾지 못했습니다 — 검색어 더 구체적으로');
+      } else {
+        showToast(`${result.quotes.length}건 시세 조회 완료`);
+        if (navigator.vibrate) navigator.vibrate(40);
+      }
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === 'GEMINI_NO_KEY') showToast('Gemini API 키 누락');
+      else if (msg.startsWith('GEMINI_HTTP_')) showToast('Gemini API 오류: ' + msg);
+      else if (msg === 'GEMINI_PARSE_ERROR') showToast('응답 파싱 실패 — 다시 시도');
+      else showToast('시세 조회 실패: ' + msg);
+    } finally {
+      setPriceLoading(false);
+    }
   }
 
   function jumpToMargin() {
@@ -778,12 +802,8 @@ function MobilePWA({ tweaks }){
                 <div className="m-scan-perm">카메라 권한 요청 중...</div>
               )}
 
-              {/* 모서리 마커만 (스캔 라인 없음 — 더 이상 바코드 디코드 X) */}
-              {cameraState === 'ready' && (
-                <div className="m-scan-frame">
-                  <div className="m-scan-window"><i/><b/></div>
-                </div>
-              )}
+              {/* 카메라 영역 풀뷰 — 마스킹/가이드 제거 (사용자 요청)
+                  OCR도 풀프레임 분석이라 영역 가이드 불필요 */}
 
               <div className="m-scan-overlay">
                 <div className="m-scan-top">
@@ -894,30 +914,94 @@ function MobilePWA({ tweaks }){
                   )}
                 </div>
 
-                {/* 멀티 사이트 검색 버튼 */}
-                <div style={{display:'grid', gridTemplateColumns:'repeat(2, 1fr)', gap:6, marginBottom:10}}>
-                  {SITE_PRESETS['sourcing-kr'].map(siteCode => {
-                    const meta = SITES[siteCode];
-                    return (
-                      <button
-                        key={siteCode}
-                        className="m-btn"
-                        onClick={() => handleSiteSearch(siteCode)}
-                        title={meta.hint}
-                        style={{padding:'12px 10px', fontSize:13, justifyContent:'flex-start', gap:6}}>
-                        <span style={{fontSize:15}}>{meta.emoji}</span>
-                        <span>{meta.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
+                {/* 시세 조회 — Gemini google_search grounding으로 마켓플레이스별 가격 자동 조사 */}
+                <button
+                  className="m-btn primary"
+                  onClick={handleSearchPrices}
+                  disabled={priceLoading || !searchQuery.trim()}
+                  style={{marginBottom:10}}>
+                  {priceLoading ? '⏳ 시세 조사 중...' : '🔍 마켓플레이스 시세 조사'}
+                </button>
 
+                {/* 시세 결과 — 마켓플레이스별 카드 */}
+                {priceSearch && priceSearch.quotes.length > 0 && (
+                  <div style={{marginBottom:12}}>
+                    <div style={{
+                      fontSize:10.5, fontWeight:700, color:'var(--ink-3)',
+                      textTransform:'uppercase', letterSpacing:'.08em', marginBottom:6,
+                      display:'flex', alignItems:'center', justifyContent:'space-between',
+                    }}>
+                      <span>시세 ({priceSearch.quotes.length}건)</span>
+                      <button onClick={() => setPriceSearch(null)}
+                        style={{border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer'}}>
+                        지우기
+                      </button>
+                    </div>
+                    <div style={{display:'flex', flexDirection:'column', gap:6}}>
+                      {priceSearch.quotes.map((q, i) => (
+                        <a key={i}
+                          href={q.url || '#'}
+                          target={q.url ? '_blank' : undefined}
+                          rel="noopener"
+                          style={{
+                            display:'flex', alignItems:'center', gap:8,
+                            padding:'10px 12px', borderRadius:10,
+                            background:'var(--surface)', border:'1px solid var(--line)',
+                            textDecoration:'none', color:'var(--ink)',
+                          }}>
+                          <div style={{flex:1, minWidth:0}}>
+                            <div style={{fontSize:12.5, fontWeight:600, letterSpacing:'-.01em'}}>
+                              {q.marketplace}
+                              {q.recency && (
+                                <span style={{fontSize:10, color:'var(--ink-3)', fontWeight:400, marginLeft:6}}>
+                                  · {q.recency}
+                                </span>
+                              )}
+                            </div>
+                            {q.title && (
+                              <div style={{fontSize:11, color:'var(--ink-3)', marginTop:2,
+                                whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
+                                {q.title}
+                              </div>
+                            )}
+                          </div>
+                          <div style={{
+                            fontFamily:'JetBrains Mono, monospace', fontWeight:700, fontSize:14,
+                            color:'var(--ink)', fontVariantNumeric:'tabular-nums',
+                          }}>
+                            {q.currency === 'KRW' ? '₩' : q.currency === 'JPY' ? '¥' : '$'}
+                            {q.price.toLocaleString()}
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                    {priceSearch.sources.length > 0 && (
+                      <details style={{marginTop:6}}>
+                        <summary style={{fontSize:10.5, color:'var(--ink-3)', cursor:'pointer'}}>
+                          출처 {priceSearch.sources.length}건 (Google 검색)
+                        </summary>
+                        <ul style={{fontSize:10, color:'var(--ink-3)', marginTop:4, paddingLeft:16}}>
+                          {priceSearch.sources.slice(0, 8).map((s, i) => (
+                            <li key={i} style={{marginBottom:2}}>
+                              <a href={s} target="_blank" rel="noopener"
+                                style={{color:'var(--ink-3)', wordBreak:'break-all'}}>
+                                {s.length > 60 ? s.slice(0, 60) + '...' : s}
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </div>
+                )}
+
+                {/* 보조 — 사이트 직접 열기 (시세 못 찾았을 때 fallback) */}
                 <details style={{marginBottom:10}}>
                   <summary style={{fontSize:11, color:'var(--ink-3)', cursor:'pointer', padding:'4px 0'}}>
-                    더 많은 검색 (아마존JP / 요도바시 / 구글)
+                    사이트 직접 열기 (번장·당근·쿠팡·메루카리·아마존JP·요도바시)
                   </summary>
-                  <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:6, marginTop:6}}>
-                    {['amazonJp', 'yodobashi', 'google'].map(siteCode => {
+                  <div style={{display:'grid', gridTemplateColumns:'repeat(2, 1fr)', gap:6, marginTop:6}}>
+                    {[...SITE_PRESETS['sourcing-kr'], 'amazonJp', 'yodobashi', 'google'].map(siteCode => {
                       const meta = SITES[siteCode];
                       return (
                         <button

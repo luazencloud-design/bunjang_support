@@ -455,3 +455,158 @@ export async function extractFromTagImage(
 
   return result;
 }
+
+// ────────────────────────────────────────────────────────────────────
+// 시세 조회 — Gemini의 Google Search grounding으로 마켓플레이스별 최근 판매가 추출
+// 백엔드 없이 실시간 시세 조회 가능 (사용자 본인 Gemini 키 활용)
+// ────────────────────────────────────────────────────────────────────
+
+export type Marketplace = '번개장터' | '당근마켓' | '쿠팡' | '11번가' | '네이버쇼핑' | '메루카리' | '기타';
+
+export interface PriceQuote {
+  marketplace: Marketplace | string;
+  price: number;
+  currency: 'KRW' | 'JPY' | 'USD';
+  title?: string;
+  url?: string;
+  recency?: string; // '최근 7일' / '최근 30일' / '판매중' 등
+}
+
+export interface PriceSearchResult {
+  query: string;
+  quotes: PriceQuote[];
+  sources: string[]; // grounding sources URL 목록
+}
+
+/**
+ * Gemini grounding으로 한국·일본 마켓플레이스 시세 조회.
+ * google_search 도구로 실시간 웹 검색 → 가격 추출 → JSON 반환.
+ *
+ * 주의: 결과는 LLM 추출이라 100% 정확하지 않을 수 있음.
+ * 비싼 상품일수록 사용자가 출처(sources)에서 직접 확인 권장.
+ *
+ * @param query   검색어 (예: 'Nike Air Force 1 LV8 DH7568-100')
+ * @param apiKey  Gemini API 키
+ */
+export async function searchPricesViaGemini(
+  query: string,
+  apiKey: string,
+): Promise<PriceSearchResult> {
+  if (!apiKey || apiKey.trim() === '') throw new Error('GEMINI_NO_KEY');
+
+  // grounding은 2.5 flash가 가장 가성비 좋음
+  const model = MODEL_MAP.flash;
+  const url = `${BASE_URL}/${model}:generateContent?key=${apiKey}`;
+
+  const prompt = `당신은 한국·일본 중고/신품 마켓플레이스의 시세 분석가입니다.
+Google 검색을 활용해 다음 상품의 최근 판매가를 마켓플레이스별로 조사하세요.
+
+[상품]
+${query}
+
+[조사 대상 마켓플레이스]
+- 번개장터 (한국 중고)
+- 당근마켓 (한국 중고)
+- 쿠팡 (한국 신품)
+- 11번가 (한국 신품)
+- 네이버쇼핑 (한국 가격비교)
+- 메루카리 (일본 중고)
+
+[지침]
+- Google 검색 결과에 실제로 노출된 가격만 사용. 추측·평균 계산·창작 금지.
+- 같은 마켓플레이스에서 여러 결과 있으면 가장 최근 또는 가장 대표적인 1~2건만.
+- 마켓플레이스를 못 찾았으면 그 항목은 생략 (빈 데이터로 채우지 말 것).
+- 가격 통화: 번장/당근/쿠팡/11번가/네이버 = KRW, 메루카리 = JPY.
+- 결과를 못 찾으면 quotes 빈 배열로.
+
+[출력 JSON 스키마]
+오직 JSON만 반환하세요. 다른 텍스트 없이.
+{
+  "quotes": [
+    {
+      "marketplace": "번개장터" | "당근마켓" | "쿠팡" | "11번가" | "네이버쇼핑" | "메루카리",
+      "price": 45000,
+      "currency": "KRW" | "JPY",
+      "title": "상품명 (옵션)",
+      "url": "출처 URL (옵션)",
+      "recency": "판매중" | "최근 7일" | "최근 30일" 등 (옵션)
+    }
+  ]
+}`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      tools: [{ google_search: {} }],
+      generationConfig: { temperature: 0.1 },
+    }),
+  });
+
+  if (!res.ok) {
+    let msg = res.statusText;
+    try {
+      const errBody = await res.json() as { error?: { message?: string } };
+      if (errBody?.error?.message) msg = errBody.error.message;
+    } catch {}
+    throw new Error(`GEMINI_HTTP_${res.status}: ${msg}`);
+  }
+
+  const data = await res.json() as {
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string }> };
+      groundingMetadata?: {
+        groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+      };
+    }>;
+  };
+
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  if (!text.trim()) throw new Error('GEMINI_PARSE_ERROR');
+
+  // 응답에서 JSON 부분만 추출 (grounding 모드는 ```json ... ``` 또는 부가 텍스트 섞일 수 있음)
+  let jsonStr = text.trim();
+  const jsonMatch = jsonStr.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
+  if (jsonMatch) jsonStr = jsonMatch[1];
+  // 첫 { ~ 마지막 } 만 시도
+  const firstBrace = jsonStr.indexOf('{');
+  const lastBrace = jsonStr.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    throw new Error('GEMINI_PARSE_ERROR');
+  }
+
+  const obj = parsed as { quotes?: unknown[] };
+  const rawQuotes = Array.isArray(obj.quotes) ? obj.quotes : [];
+
+  const quotes: PriceQuote[] = [];
+  for (const q of rawQuotes) {
+    if (!q || typeof q !== 'object') continue;
+    const item = q as Record<string, unknown>;
+    if (typeof item.marketplace !== 'string' || typeof item.price !== 'number' || item.price <= 0) continue;
+    if (item.currency !== 'KRW' && item.currency !== 'JPY' && item.currency !== 'USD') continue;
+    quotes.push({
+      marketplace: item.marketplace,
+      price: item.price,
+      currency: item.currency,
+      title: typeof item.title === 'string' ? item.title : undefined,
+      url: typeof item.url === 'string' ? item.url : undefined,
+      recency: typeof item.recency === 'string' ? item.recency : undefined,
+    });
+  }
+
+  // grounding sources 추출
+  const chunks = data?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+  const sources = chunks
+    .map(c => c.web?.uri)
+    .filter((u): u is string => typeof u === 'string');
+
+  return { query, quotes, sources };
+}

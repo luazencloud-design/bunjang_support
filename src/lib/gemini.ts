@@ -317,15 +317,29 @@ const TAG_PROMPT = `당신은 상품 택/라벨 사진을 분석해서 구조화
 사진에서 보이는 모든 텍스트를 읽고, 그 중 상품 식별에 필요한 정보를 분류해서 JSON으로 반환하세요.
 
 [추출 대상]
-- brand: 브랜드명 (예: Nike, Adidas, Chanel)
-- model: 제품 모델명 (예: Air Force 1 Low, Stan Smith)
-- modelCode: 제품 코드/SKU (예: DH7568-100, ID2773) — 영문+숫자 조합
+- brand: 브랜드명 (예: Nike, Adidas, Chanel) — 회사/제조사 이름
+- model: 제품 라인/시리즈명 (예: Air Force 1 Low, Stan Smith, Cortez)
+  ⚠️ 절대 brand와 같은 값을 model에 쓰지 마세요. brand="Nike"면 model은 "Nike"가 될 수 없음.
+  ⚠️ model은 \"브랜드 다음에 오는 제품 고유 명칭\"입니다. 예: \"Nike Air Force 1\"의 model은 \"Air Force 1\".
+  ⚠️ 사진에 제품명이 명확히 보이지 않으면 model은 빈 문자열로 두세요. 추측 금지.
+- modelCode: 제품 코드/SKU (예: DH7568-100, ID2773, FZ5057-100) — 영문+숫자 조합 패턴
+  · model 필드와 다름. modelCode에는 코드만 (예: "DH7568-100"), model에는 사람이 부르는 이름.
 - size: 사이즈 (한국 mm 또는 US/UK/EU 표기 그대로)
 - color: 색상명 (라벨에 표시된 그대로)
 - price: 가격 (숫자만, 통화 기호 제외)
 - currency: 가격 통화 — KRW/JPY/USD 중 하나
 - category: 추정 카테고리 — sneakers / apparel / cosmetics / electronics / accessories / other
 - rawText: 사진에서 읽은 모든 텍스트를 줄바꿈으로 구분 (검수용)
+
+[좋은 예 — 신발]
+사진에 "NIKE" 로고 + "AIR FORCE 1 '07" + "DH7568-100" 텍스트 보이면:
+{ "brand": "Nike", "model": "Air Force 1 '07", "modelCode": "DH7568-100", ... }
+
+[나쁜 예 — 절대 이렇게 하지 말 것]
+사진에 "NIKE" 로고만 크게 + "DH7568-100" 코드만 보이면 (제품명 안 보임):
+✗ { "brand": "Nike", "model": "Nike", "modelCode": "DH7568-100" }  ← 잘못
+✗ { "brand": "Nike", "model": "DH7568-100", "modelCode": "DH7568-100" }  ← 잘못 (중복)
+✓ { "brand": "Nike", "modelCode": "DH7568-100" }  ← 정답 (model은 빈 값/생략)
 
 [지침]
 - 정보가 사진에 명확히 보일 때만 채워라. 추측하지 마라.
@@ -451,6 +465,23 @@ export async function extractFromTagImage(
   if (typeof obj.price === 'number' && obj.price > 0) result.price = obj.price;
   if (obj.currency === 'KRW' || obj.currency === 'JPY' || obj.currency === 'USD') {
     result.currency = obj.currency;
+  }
+
+  // Post-processing: Gemini가 자주 저지르는 실수 정리
+  // 1) model이 brand와 동일 (예: brand="Nike", model="Nike") → model 제거
+  if (result.brand && result.model &&
+      result.brand.toLowerCase() === result.model.toLowerCase()) {
+    delete result.model;
+  }
+  // 2) model이 modelCode와 동일 (예: model="DH7568-100", modelCode="DH7568-100") → model 제거
+  if (result.model && result.modelCode &&
+      result.model.toLowerCase() === result.modelCode.toLowerCase()) {
+    delete result.model;
+  }
+  // 3) model이 SKU 패턴(영문+숫자+하이픈)이고 modelCode 비어있으면 → model을 modelCode로 이동
+  if (result.model && !result.modelCode && /^[A-Z0-9]+-?[A-Z0-9]+$/i.test(result.model.replace(/\s/g, ''))) {
+    result.modelCode = result.model;
+    delete result.model;
   }
 
   return result;

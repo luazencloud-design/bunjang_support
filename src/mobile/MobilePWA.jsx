@@ -561,16 +561,22 @@ function MobilePWA({ tweaks }){
       const info = await extractFromTagImage(blob, settings.geminiApiKey);
       setTagInfo(info);
       // 검색어를 자동으로 "브랜드 + 모델"로 채우기
-      // 검색어 자동 채움 — 제품명(brand + model) 우선
-      // modelCode(SKU)는 너무 구체적이라 시세 검색 결과가 좁아짐 → searchQuery에는 안 넣음
-      // (modelCode는 결과 카드 칩으로만 표시, 사용자가 필요시 검색어에 직접 추가)
-      const parts = [info.brand, info.model]
-        .filter(Boolean)
-        .filter((v, i, arr) => arr.indexOf(v) === i);
-      // brand+model 둘 다 없을 때만 modelCode를 마지막 수단으로
-      const composed = parts.length > 0
-        ? parts.join(' ').trim()
-        : (info.modelCode || '').trim();
+      // 검색어 자동 채움 우선순위:
+      //   1. brand + model       (제품명 — 시세 조사에 가장 좋음)
+      //   2. brand + modelCode   (제품명 못 얻은 경우 SKU로 보강 — "Nike"만 단독은 너무 광범위)
+      //   3. modelCode 단독       (브랜드도 못 얻은 극단 케이스)
+      const hasModel = info.model && info.brand && info.model.toLowerCase() !== info.brand.toLowerCase();
+      let composed = '';
+      if (info.brand && hasModel) {
+        composed = `${info.brand} ${info.model}`.trim();
+      } else if (info.brand && info.modelCode) {
+        // model 없을 때 brand 단독은 검색이 무의미 → SKU 코드로 보강
+        composed = `${info.brand} ${info.modelCode}`.trim();
+      } else if (info.brand) {
+        composed = info.brand.trim();
+      } else if (info.modelCode) {
+        composed = info.modelCode.trim();
+      }
       if (composed) {
         setSearchQuery(composed);
         saveJson(LS_KEY_LAST_QUERY, composed);

@@ -645,38 +645,51 @@ function MobilePWA({ tweaks }){
     e.target.value = '';
   }
 
+  // 캡처된 분석용 Blob 보관 (확인 후 Gemini 전송용)
+  const pendingBlobRef = useRef(null);
+
   // 캡처 프리뷰 해제 — 재촬영 모드로 (카메라 다시 라이브)
   function clearCapturedPreview() {
     setCapturedPreview((url) => {
       if (url) URL.revokeObjectURL(url);
       return null;
     });
+    pendingBlobRef.current = null;
   }
 
-  // ── 택 분석 — Gemini Vision으로 사진에서 브랜드/모델/사이즈/가격 추출 ──
-  async function handleAnalyzeTag() {
+  // ── 1단계: 택 사진 찍기 (캡처만, 분석은 다음 단계) ──
+  // 사진 잘못 찍히면 API 낭비라 사용자가 확인 후 분석 결정
+  async function handleCaptureTag() {
     if (ocrLoading) return;
     if (cameraState !== 'ready') {
       showToast('카메라가 활성화되지 않았습니다');
+      return;
+    }
+    // OCR용 캡처는 1280px로 축소 — 업로드 70% ↓, Gemini 처리도 빨라짐
+    const blob = await captureFrameToBlob(videoRef.current, 1280, 0.85);
+    if (!blob) {
+      showToast('사진 캡처 실패');
+      return;
+    }
+    // 기존 preview 정리 후 새 사진 표시
+    if (capturedPreview) URL.revokeObjectURL(capturedPreview);
+    setCapturedPreview(URL.createObjectURL(blob));
+    pendingBlobRef.current = blob;
+    if (navigator.vibrate) navigator.vibrate(40);
+  }
+
+  // ── 2단계: 캡처된 사진으로 분석 진행 (사용자 확인 후) ──
+  async function handleAnalyzeTag() {
+    if (ocrLoading) return;
+    const blob = pendingBlobRef.current;
+    if (!blob) {
+      showToast('먼저 택 사진을 찍으세요');
       return;
     }
     if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
       showToast('설정에서 Gemini API 키를 입력하세요');
       return;
     }
-    // OCR용 캡처는 1280px로 축소 — 4K 풀해상도 대비 업로드 70% ↓, Gemini 처리도 빨라짐
-    // 텍스트 인식 정확도는 1280px이면 충분 (택의 글자가 화면 1/3 이상이면 인식됨)
-    const blob = await captureFrameToBlob(videoRef.current, 1280, 0.85);
-    if (!blob) {
-      showToast('사진 캡처 실패');
-      return;
-    }
-    // 카메라 영역에 캡처한 사진 오버레이 표시 (사용자가 무엇을 분석하는지 확인 가능)
-    // 기존 preview URL 있으면 정리 후 새로
-    if (capturedPreview) URL.revokeObjectURL(capturedPreview);
-    setCapturedPreview(URL.createObjectURL(blob));
-    // 택 분석용 사진은 등록용(photos)에 추가 X — OCR 후 그대로 폐기
-    // 등록용 사진은 [📁 사진 추가]로만
     setOcrLoading(true);
     try {
       const info = await extractFromTagImage(blob, settings.geminiApiKey);
@@ -1035,36 +1048,58 @@ function MobilePWA({ tweaks }){
                     )}
                   </div>
                 </div>
-                <div className="m-scan-bottom" style={{justifyContent:'center', alignItems:'center'}}>
-                  {/* 메인 버튼 — 캡처 전: [택 분석], 캡처 후: [재촬영] */}
-                  <button
-                    onClick={capturedPreview ? clearCapturedPreview : handleAnalyzeTag}
-                    disabled={ocrLoading}
-                    title={capturedPreview
-                      ? '재촬영 — 카메라로 돌아가서 다시 찍기'
-                      : '택 사진 분석 → 브랜드/모델/사이즈/가격 자동 추출'}
-                    style={{
-                      width:84, height:84, borderRadius:'50%',
-                      background: ocrLoading
-                        ? 'rgba(255,255,255,.4)'
-                        : capturedPreview
-                          ? 'rgba(255,255,255,.95)'
-                          : 'var(--accent)',
-                      border:'4px solid rgba(255,255,255,.35)',
-                      color: capturedPreview ? 'var(--ink)' : 'white',
-                      fontFamily:'inherit',
-                      display:'flex', alignItems:'center', justifyContent:'center',
-                      fontSize: ocrLoading ? 28 : 13, fontWeight:700,
-                      letterSpacing:'-.02em', lineHeight:1,
-                      boxShadow: '0 4px 16px oklch(68% 0.15 45 / 0.4)',
-                      opacity: ocrLoading ? 0.7 : 1,
-                    }}>
-                    {ocrLoading
-                      ? '⏳'
-                      : capturedPreview
-                        ? <span>재<br/>촬영</span>
-                        : <span>택<br/>분석</span>}
-                  </button>
+                <div className="m-scan-bottom" style={{justifyContent:'center', alignItems:'center', gap:14}}>
+                  {!capturedPreview ? (
+                    /* 라이브 모드: 셔터 버튼 (택 사진 캡처만) */
+                    <button
+                      onClick={handleCaptureTag}
+                      title="택 사진 찍기 (찍은 후 분석 여부 확인)"
+                      style={{
+                        width:84, height:84, borderRadius:'50%',
+                        background:'var(--accent)',
+                        border:'4px solid rgba(255,255,255,.35)',
+                        color:'white', fontFamily:'inherit',
+                        display:'flex', alignItems:'center', justifyContent:'center',
+                        fontSize:13, fontWeight:700,
+                        letterSpacing:'-.02em', lineHeight:1,
+                        boxShadow:'0 4px 16px oklch(68% 0.15 45 / 0.4)',
+                      }}>
+                      <span>택<br/>찍기</span>
+                    </button>
+                  ) : (
+                    /* 프리뷰 모드: [↺ 재촬영] + [✅ 이 사진으로 분석] */
+                    <>
+                      <button
+                        onClick={clearCapturedPreview}
+                        disabled={ocrLoading}
+                        title="다시 찍기"
+                        style={{
+                          height:56, padding:'0 20px', borderRadius:28,
+                          background:'rgba(255,255,255,.95)', color:'var(--ink)',
+                          border:'2px solid rgba(255,255,255,.35)',
+                          fontFamily:'inherit', fontSize:14, fontWeight:700,
+                          display:'flex', alignItems:'center', gap:6,
+                          opacity: ocrLoading ? 0.5 : 1,
+                        }}>
+                        ↺ 재촬영
+                      </button>
+                      <button
+                        onClick={handleAnalyzeTag}
+                        disabled={ocrLoading}
+                        title="이 사진으로 분석 — Gemini Vision 호출"
+                        style={{
+                          height:56, padding:'0 22px', borderRadius:28,
+                          background: ocrLoading ? 'rgba(255,255,255,.4)' : 'var(--accent)',
+                          color:'white', border:'2px solid rgba(255,255,255,.35)',
+                          fontFamily:'inherit', fontSize:14, fontWeight:700,
+                          display:'flex', alignItems:'center', gap:6,
+                          boxShadow:'0 4px 16px oklch(68% 0.15 45 / 0.4)',
+                          opacity: ocrLoading ? 0.7 : 1,
+                        }}>
+                        {ocrLoading ? <><span className="m-spin">⟳</span> 분석 중</> : <>✓ 이 사진으로 분석</>}
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </div>

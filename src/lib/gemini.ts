@@ -518,6 +518,53 @@ export interface ProductLookup {
   edition?: string;       // 에디션 (예: "SP", "OG", "Retro")
 }
 
+// Gemini grounding 자연어 텍스트 응답 1회 호출 (JSON 강제 X)
+// JSON 출력 강제하면 모델이 색상 같은 부가 정보를 압축하느라 누락하는 경향 있음.
+// 직접 채팅처럼 자연어로 답하게 두면 색상까지 잘 가져옴.
+async function callGroundingText(prompt: string, apiKey: string, modelName: GeminiModel): Promise<string> {
+  const model = MODEL_MAP[modelName];
+  const url = `${BASE_URL}/${model}:generateContent?key=${apiKey}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      tools: [{ google_search: {} }],
+      generationConfig: { temperature: 0.2 },
+    }),
+  });
+  if (!res.ok) return '';
+  const data = await res.json() as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
+  return (data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '').trim();
+}
+
+// 자연어 응답에서 풀네임 한 줄 추출
+// 응답 예: "BV7725-700은 나이키 데이브레이크 SP '베가스 골드(Vegas Gold)' 모델입니다."
+// 추출:    "나이키 데이브레이크 SP 베가스 골드"
+function extractFullNameFromText(text: string, brand: string): string {
+  if (!text) return '';
+  // 첫 줄 또는 첫 문장
+  let line = text.split(/[\n.]/)[0].trim();
+  // 흔한 패턴 제거: "XXX는 ", "XXX는: " 등
+  line = line.replace(/^[A-Z0-9-]+\s*(은|는|이|가|:)\s*/i, '');
+  // 마무리 어구 제거: "모델입니다", "입니다", "라는 신발", "라고 합니다"
+  line = line.replace(/(모델입니다|입니다|라는 신발(이에요|입니다)?|이에요|라고 합니다|입니다\.)\s*$/g, '').trim();
+  // 따옴표 안의 영어 보충 제거: "베가스 골드(Vegas Gold)" → "베가스 골드"
+  line = line.replace(/\s*\(([^)]*)\)/g, (_, content) => {
+    // 한글 포함이면 보존, 영어만이면 제거
+    return /[가-힣]/.test(content) ? ` ${content}` : '';
+  });
+  // 양 끝 따옴표 제거
+  line = line.replace(/^['"`'"]+|['"`'"]+$/g, '').trim();
+  // 따옴표 안의 한글은 살리기 ("'베가스 골드'" → "베가스 골드")
+  line = line.replace(/['"`'"]/g, ' ').replace(/\s+/g, ' ').trim();
+  // 결과가 brand로 시작 안 하면 brand 한국어 표기 추정해서 prepend?
+  // → 일단 그대로 반환 (사용자가 검수 가능)
+  return line;
+}
+
 export async function lookupProductName(
   brand: string,
   modelCode: string,
@@ -526,85 +573,33 @@ export async function lookupProductName(
   if (!apiKey || apiKey.trim() === '') throw new Error('GEMINI_NO_KEY');
   if (!brand || !modelCode) return null;
 
-  const model = MODEL_MAP.flash;
-  const url = `${BASE_URL}/${model}:generateContent?key=${apiKey}`;
+  // ── 자연어 질문 ── (사용자가 직접 챗에서 묻듯이)
+  // JSON 강제 X → 색상 정보까지 풀로 가져옴
+  const naturalPrompt = `${brand} ${modelCode}는 무슨 제품이야?
+한국에서 부르는 정확한 풀네임을 한 줄로만 답해줘. 색상명까지 포함해서.
+브랜드, 시리즈, 에디션, 색상 다 포함된 형태로.
+다른 설명 없이 풀네임 한 줄만.
 
-  const prompt = `당신은 신발/패션 SKU 조회 전문가입니다.
-Google 검색으로 다음 SKU의 한국에서 통용되는 상세 상품명을 정확히 알려주세요.
+예시 답:
+- "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지"
+- "나이키 에어 포스 1 '07 트리플 화이트"
+- "아디다스 삼바 OG 화이트 블랙"`;
 
-[조회 대상]
-브랜드: ${brand}
-SKU/모델코드: ${modelCode}
+  // Pro로 첫 시도 (색상 추출 정확도 ↑)
+  let text = await callGroundingText(naturalPrompt, apiKey, 'pro');
+  let fullName = extractFullNameFromText(text, brand);
 
-[필요한 정보]
-- 제품 시리즈명 (예: 데이브레이크, 에어 포스 1, 삼바)
-- 에디션 (예: SP, OG, Retro, Low, Mid, High) — 있으면
-- 색상/배색명 (예: 베가스 골드 컬리지 오렌지, 화이트 블랙) — 있으면
-- 같은 제품군이라도 SKU별로 색상/에디션이 다르므로 정확히 조회해야 함
-
-[좋은 예]
-- Nike CK2351-101 → fullName: "나이키 데이브레이크 라이트 본"
-- Nike BV7725-700 → fullName: "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지"
-- Nike DZ5485-100 → fullName: "나이키 에어 포스 1 '07 화이트"
-- Adidas FZ5057   → fullName: "아디다스 삼바 OG 화이트 블랙"
-
-[지침]
-- fullName: 한국 쇼핑몰/번개장터에서 실제로 사용되는 풀네임 (브랜드 + 시리즈 + 에디션 + 색상)
-- 한국어 표기 우선 (영어밖에 못 찾으면 영어로)
-- shortName/colorway/edition은 분리 가능하면 분리, 모르면 생략
-- Google 검색 결과에 정확한 정보 없으면 빈 fullName 반환 (추측 금지)
-
-[출력 JSON]
-오직 JSON만 반환. 다른 텍스트 없이.
-{
-  "fullName": "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지",
-  "shortName": "데이브레이크",
-  "colorway": "베가스 골드 컬리지 오렌지",
-  "edition": "SP"
-}`;
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      tools: [{ google_search: {} }],
-      generationConfig: { temperature: 0.1 },
-    }),
-  });
-
-  if (!res.ok) return null;
-  const data = await res.json() as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-  };
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-  if (!text.trim()) return null;
-
-  // JSON 추출 — grounding 응답은 ```json ... ``` 또는 부가 텍스트 섞임
-  let jsonStr = text.trim();
-  const jsonMatch = jsonStr.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
-  if (jsonMatch) jsonStr = jsonMatch[1];
-  const firstBrace = jsonStr.indexOf('{');
-  const lastBrace = jsonStr.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
+  // Pro 실패 또는 너무 짧으면 (브랜드 추정 실패 등) Flash 폴백
+  if (!fullName || fullName.length < 5) {
+    text = await callGroundingText(naturalPrompt, apiKey, 'flash');
+    fullName = extractFullNameFromText(text, brand);
   }
-  try {
-    const parsed = JSON.parse(jsonStr) as Partial<ProductLookup>;
-    const fullName = (parsed.fullName || '').trim();
-    if (fullName.length < 3) return null;
-    // 결과가 brand 자체나 SKU만 반환된 경우 거부
-    if (fullName.toLowerCase() === brand.toLowerCase()) return null;
-    if (fullName.toLowerCase() === modelCode.toLowerCase()) return null;
-    return {
-      fullName,
-      shortName: typeof parsed.shortName === 'string' ? parsed.shortName.trim() || undefined : undefined,
-      colorway: typeof parsed.colorway === 'string' ? parsed.colorway.trim() || undefined : undefined,
-      edition: typeof parsed.edition === 'string' ? parsed.edition.trim() || undefined : undefined,
-    };
-  } catch {
-    return null;
-  }
+
+  if (!fullName || fullName.length < 3) return null;
+  if (fullName.toLowerCase() === brand.toLowerCase()) return null;
+  if (fullName.toLowerCase() === modelCode.toLowerCase()) return null;
+
+  return { fullName };
 }
 
 // ────────────────────────────────────────────────────────────────────

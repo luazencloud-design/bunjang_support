@@ -11,6 +11,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { fetchFxRatesIfStale, fetchFxRates } from '../lib/fx';
 import { SITES, SITE_PRESETS, openSearchTab } from '../lib/search';
 import { extractFromTagImage, searchPricesViaGemini, lookupProductName } from '../lib/gemini';
+import { parseSize, formatSize } from '../lib/size';
 
 // 카메라 캡처 헬퍼 — video 엘리먼트에서 한 프레임을 JPEG Blob으로
 function captureFrameToBlob(video) {
@@ -363,6 +364,9 @@ function MobilePWA({ tweaks }){
 
   // 택 OCR 결과 (Gemini Vision으로 추출한 상품 정보)
   const [tagInfo, setTagInfo] = useState(null);  // { brand, model, size, color, price, currency, ... } | null
+  // 사용자가 편집한 PC 전송 페이로드 — tagInfo가 바뀌면 자동 리셋됨
+  // { title, brand, model, modelCode, feature } — null이면 기본값(tagInfo에서 파생)
+  const [editedPayload, setEditedPayload] = useState(null);
   const [ocrLoading, setOcrLoading] = useState(false);
 
   // 시세 조회 결과 (Gemini grounding)
@@ -405,6 +409,26 @@ function MobilePWA({ tweaks }){
   useEffect(() => { saveJson(LS_KEY_SETTINGS, settings); }, [settings]);
   useEffect(() => { saveJson(LS_KEY_FXMETA, fxMeta); }, [fxMeta]);
   useEffect(() => { saveJson(LS_KEY_HISTORY, history); }, [history]);
+
+  // tagInfo 갱신 시 editedPayload 자동 리셋 (OCR 결과 새로 들어오면 편집값 초기화)
+  useEffect(() => {
+    if (!tagInfo) {
+      setEditedPayload(null);
+      return;
+    }
+    setEditedPayload({
+      title: tagInfo.fullName
+        ? tagInfo.fullName
+        : [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim(),
+      brand: tagInfo.brand || '',
+      model: tagInfo.model || '',
+      modelCode: tagInfo.modelCode || '',
+      feature: [
+        tagInfo.size && `사이즈 ${tagInfo.size}`,
+        tagInfo.color,
+      ].filter(Boolean).join(', '),
+    });
+  }, [tagInfo]);
 
   // 카메라 자동 재시도 카운터 (검은화면 감지 시 자동 증가, 최대 3회)
   const [restartCounter, setRestartCounter] = useState(0);
@@ -608,6 +632,20 @@ function MobilePWA({ tweaks }){
     setOcrLoading(true);
     try {
       const info = await extractFromTagImage(blob, settings.geminiApiKey);
+
+      // 사이즈 한국식 mm로 자동 변환 (US/UK/EU/cm → mm)
+      // 사이즈 차트는 표준이라 하드코딩이 정답 (src/lib/size.ts)
+      if (info.size) {
+        const parsed = parseSize(info.size);
+        if (parsed.mm !== null) {
+          // 변환 성공 → tagInfo.size를 한국 mm 표기로 교체, 원본은 sizeOriginal에 보관
+          info.sizeOriginal = info.size;
+          info.size = parsed.korean; // '270mm'
+          info.sizeMm = parsed.mm;   // 270
+          info.sizeSource = parsed.source; // 'us'/'eu'/...
+        }
+      }
+
       setTagInfo(info);
 
       // 가격 정보 있으면 마진 계산용 cost로도 채워주기
@@ -729,26 +767,19 @@ function MobilePWA({ tweaks }){
       showToast('보낼 정보가 없습니다');
       return;
     }
-    // 페이로드 — 확장 사이드패널의 Product 형태로 매핑
+    // 페이로드 — editedPayload(사용자 편집값) 우선 사용
+    const ep = editedPayload || {};
     const payload = {
       v: 1, // 스키마 버전
-      // 제목 우선순위: lookupProductName이 채운 fullName > brand+model > searchQuery
-      title: tagInfo?.fullName
-        ? tagInfo.fullName
-        : tagInfo
-          ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim()
-          : (searchQuery || ''),
-      brand: tagInfo?.brand,
-      model: tagInfo?.model,
-      modelCode: tagInfo?.modelCode,
-      // 사이드패널 AI 입력란용 feature 필드에 합치기 (사이즈/색상 등 분류 안 된 텍스트)
-      feature: [tagInfo?.size && `사이즈 ${tagInfo.size}`, tagInfo?.color]
-        .filter(Boolean).join(', '),
+      title: ep.title || searchQuery || '',
+      brand: ep.brand || undefined,
+      model: ep.model || undefined,
+      modelCode: ep.modelCode || undefined,
+      feature: ep.feature || undefined,
       cost: cost || tagInfo?.price || 0,
       costCurrency: costCurrency || tagInfo?.currency || 'KRW',
       price: price || 0,
       priceCurrency: 'KRW',
-      // 사진은 URL 한계로 못 담음 — Phase 8 백엔드 큐로 별도 처리
       photoCount: photos.length,
     };
     const json = JSON.stringify(payload);
@@ -803,19 +834,15 @@ function MobilePWA({ tweaks }){
 
   // ── JSON만 복사 — 수동으로 보내고 싶거나 다른 도구에 붙여넣을 때 ──
   async function handleCopyJson() {
+    // editedPayload 우선 사용 (사용자 편집 반영)
+    const ep = editedPayload || {};
     const payload = {
       v: 1,
-      // 제목 우선순위: lookupProductName이 채운 fullName > brand+model > searchQuery
-      title: tagInfo?.fullName
-        ? tagInfo.fullName
-        : tagInfo
-          ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim()
-          : (searchQuery || ''),
-      brand: tagInfo?.brand,
-      model: tagInfo?.model,
-      modelCode: tagInfo?.modelCode,
-      feature: [tagInfo?.size && `사이즈 ${tagInfo.size}`, tagInfo?.color]
-        .filter(Boolean).join(', ') || undefined,
+      title: ep.title || searchQuery || undefined,
+      brand: ep.brand || undefined,
+      model: ep.model || undefined,
+      modelCode: ep.modelCode || undefined,
+      feature: ep.feature || undefined,
       cost: cost || tagInfo?.price || undefined,
       costCurrency: cost || tagInfo?.price ? (costCurrency || tagInfo?.currency || 'KRW') : undefined,
       price: price || undefined,
@@ -993,7 +1020,14 @@ function MobilePWA({ tweaks }){
                     )}
                     <div style={{display:'flex', flexWrap:'wrap', gap:5, marginBottom:12}}>
                       {tagInfo.modelCode && <span className="m-chip">코드 {tagInfo.modelCode}</span>}
-                      {tagInfo.size && <span className="m-chip">사이즈 {tagInfo.size}</span>}
+                      {tagInfo.size && (
+                        <span className="m-chip" title={tagInfo.sizeOriginal && tagInfo.sizeOriginal !== tagInfo.size ? `원본: ${tagInfo.sizeOriginal}` : undefined}>
+                          사이즈 {tagInfo.size}
+                          {tagInfo.sizeOriginal && tagInfo.sizeOriginal !== tagInfo.size && (
+                            <span style={{opacity:.6, marginLeft:3}}>· {tagInfo.sizeOriginal}</span>
+                          )}
+                        </span>
+                      )}
                       {tagInfo.color && <span className="m-chip">{tagInfo.color}</span>}
                       {tagInfo.price && tagInfo.currency && (
                         <span className="m-chip success">
@@ -1166,30 +1200,64 @@ function MobilePWA({ tweaks }){
                       textTransform:'uppercase', letterSpacing:'.08em', cursor:'pointer',
                       marginBottom:6,
                     }}>
-                      📋 PC로 보낼 정보
+                      📋 PC로 보낼 정보 <span style={{color:'var(--ink-3)', fontWeight:400, marginLeft:4}}>(편집 가능)</span>
                     </summary>
                     <div style={{
                       background:'var(--chip)', borderRadius:8, padding:'10px 12px',
-                      fontSize:11.5, color:'var(--ink-2)', lineHeight:1.6,
+                      fontSize:11.5, color:'var(--ink-2)',
+                      display:'flex', flexDirection:'column', gap:6,
                     }}>
                       {(() => {
                         const sym = costCurrency === 'KRW' ? '₩' : costCurrency === 'JPY' ? '¥' : '$';
-                        const rows = [
-                          ['제목', tagInfo ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ') : searchQuery],
-                          ['브랜드', tagInfo?.brand],
-                          ['모델', tagInfo?.model],
-                          ['모델코드', tagInfo?.modelCode],
-                          ['특징', [tagInfo?.size && `사이즈 ${tagInfo.size}`, tagInfo?.color].filter(Boolean).join(', ')],
-                          ['원가', cost > 0 ? `${sym}${cost.toLocaleString()}` : null],
-                          ['판매가', price > 0 ? `₩${price.toLocaleString()}` : null],
-                          ['사진', photos.length > 0 ? `${photos.length}장` : null],
-                        ].filter(([_, v]) => v);
-                        return rows.map(([k, v]) => (
-                          <div key={k} style={{display:'flex', gap:8}}>
-                            <span style={{color:'var(--ink-3)', minWidth:50}}>{k}:</span>
-                            <span style={{flex:1, wordBreak:'break-all'}}>{v}</span>
-                          </div>
-                        ));
+                        const update = (field, value) => {
+                          setEditedPayload((p) => ({ ...(p || {}), [field]: value }));
+                        };
+                        const inputStyle = {
+                          flex:1, minWidth:0,
+                          border:'1px solid var(--line-2)', borderRadius:6,
+                          padding:'5px 8px', fontSize:11.5, color:'var(--ink)',
+                          background:'var(--surface)', fontFamily:'inherit',
+                          outline:'none',
+                        };
+                        const labelStyle = {
+                          color:'var(--ink-3)', minWidth:54, fontSize:10.5, paddingTop:6,
+                        };
+                        const fields = [
+                          ['title', '제목'],
+                          ['brand', '브랜드'],
+                          ['model', '모델'],
+                          ['modelCode', '모델코드'],
+                          ['feature', '특징'],
+                        ];
+                        return (
+                          <>
+                            {fields.map(([key, label]) => (
+                              <div key={key} style={{display:'flex', gap:8, alignItems:'flex-start'}}>
+                                <span style={labelStyle}>{label}:</span>
+                                <input
+                                  type="text"
+                                  value={(editedPayload?.[key]) ?? ''}
+                                  placeholder={`(${label} 없음)`}
+                                  onChange={(e) => update(key, e.target.value)}
+                                  style={inputStyle}
+                                />
+                              </div>
+                            ))}
+                            {/* 원가/판매가/사진은 읽기전용 표시 — 마진 탭이나 캡처에서 따로 관리 */}
+                            <div style={{
+                              fontSize:10.5, color:'var(--ink-3)',
+                              paddingTop:6, marginTop:2, borderTop:'1px dashed var(--line-2)',
+                              lineHeight:1.6,
+                            }}>
+                              {cost > 0 && <div>원가: {sym}{cost.toLocaleString()}</div>}
+                              {price > 0 && <div>판매가: ₩{price.toLocaleString()}</div>}
+                              {photos.length > 0 && <div>사진: {photos.length}장 (Web Share files 동봉)</div>}
+                              <div style={{marginTop:4, opacity:.7}}>
+                                ⓘ 원가/판매가는 마진 탭에서, 사진은 [📷 사진] 또는 [📁 사진 추가]로 변경
+                              </div>
+                            </div>
+                          </>
+                        );
                       })()}
                     </div>
                   </details>

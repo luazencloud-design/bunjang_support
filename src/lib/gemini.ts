@@ -305,12 +305,16 @@ export interface TagInfo {
   brand?: string;
   model?: string;
   modelCode?: string;       // 예: 'DH7568-100' (Nike SKU)
-  size?: string;            // 예: '260' / 'US 9' / 'M'
+  size?: string;            // 한국 mm 표기 (예: '270mm') — 변환 후
+  sizeOriginal?: string;    // 원본 표기 (예: 'US 9') — 검수용
+  sizeMm?: number;          // 숫자 mm (예: 270) — 카테고리 옵션 자동선택용
+  sizeSource?: 'mm' | 'us' | 'uk' | 'eu' | 'cm' | 'unknown';
   color?: string;
   price?: number;
   currency?: 'KRW' | 'JPY' | 'USD';
   category?: string;        // 예: 'sneakers' / 'apparel' / 'cosmetics'
   rawText: string;          // OCR 원본 (사용자 검수용)
+  fullName?: string;        // SKU 조회로 보강된 한국어 풀네임 (브랜드+시리즈+에디션+색상)
 }
 
 const TAG_PROMPT = `당신은 상품 택/라벨 사진을 분석해서 구조화된 정보를 추출하는 OCR 전문가입니다.

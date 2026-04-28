@@ -10,19 +10,34 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { fetchFxRatesIfStale, fetchFxRates } from '../lib/fx';
 import { SITES, SITE_PRESETS, openSearchTab } from '../lib/search';
-import { extractFromTagImage } from '../lib/gemini';
+import { extractFromTagImage, searchPricesViaGemini, lookupProductName } from '../lib/gemini';
+import { parseSize, formatSize } from '../lib/size';
 
 // 카메라 캡처 헬퍼 — video 엘리먼트에서 한 프레임을 JPEG Blob으로
-function captureFrameToBlob(video) {
+//
+// @param video      비디오 엘리먼트
+// @param maxWidth   최대 가로 (px). 0/null = 원본 해상도 유지
+// @param quality    JPEG 품질 0~1 (기본 0.85)
+//
+// 등록용 사진은 maxWidth 없이 (고화질),
+// OCR 분석용은 maxWidth=1280 (업로드/처리 속도 ↑, 글자 인식 정확도는 변동 거의 없음)
+function captureFrameToBlob(video, maxWidth = 0, quality = 0.85) {
   return new Promise((resolve) => {
     if (!video?.videoWidth || !video?.videoHeight) return resolve(null);
+    let w = video.videoWidth;
+    let h = video.videoHeight;
+    if (maxWidth > 0 && w > maxWidth) {
+      const scale = maxWidth / w;
+      w = maxWidth;
+      h = Math.round(video.videoHeight * scale);
+    }
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext('2d');
     if (!ctx) return resolve(null);
-    ctx.drawImage(video, 0, 0);
-    canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.92);
+    ctx.drawImage(video, 0, 0, w, h);
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', quality);
   });
 }
 
@@ -123,26 +138,25 @@ const mobileCss = `
     animation: pulse 1.4s ease-in-out infinite;
   }
   @keyframes pulse{ 50%{opacity:.4} }
-  .m-scan-frame{ position: absolute; inset: 0; display:flex; align-items:center; justify-content:center; pointer-events:none; }
-  .m-scan-window{ width: 78%; height: 30%; border-radius: 14px; box-shadow: 0 0 0 9999px rgba(0,0,0,.40); position: relative; }
-  .m-scan-window::before, .m-scan-window::after, .m-scan-window > i, .m-scan-window > b{
-    content:''; position:absolute; width: 24px; height: 24px;
-    border: 2.5px solid var(--accent);
+
+  /* 로딩 — 회전 spinner + 좌우 shimmer */
+  @keyframes m-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .m-spin { display: inline-block; animation: m-spin 1s linear infinite; }
+  @keyframes m-shimmer-bg {
+    0% { background-position: -100% 0; }
+    100% { background-position: 200% 0; }
   }
-  .m-scan-window::before{ top:-2px; left:-2px; border-right:none; border-bottom:none; border-radius: 6px 0 0 0; }
-  .m-scan-window::after{ top:-2px; right:-2px; border-left:none; border-bottom:none; border-radius: 0 6px 0 0; }
-  .m-scan-window > i{ bottom:-2px; left:-2px; border-right:none; border-top:none; border-radius: 0 0 0 6px; }
-  .m-scan-window > b{ bottom:-2px; right:-2px; border-left:none; border-top:none; border-radius: 0 0 6px 0; }
-  .m-scan-line{
-    position:absolute; left: 5%; right: 5%; top:50%; height: 2px;
-    background: linear-gradient(to right, transparent, var(--accent), transparent);
-    animation: scan 2.4s ease-in-out infinite;
-    box-shadow: 0 0 12px var(--accent);
+  .m-shimmer-bg {
+    background: linear-gradient(90deg,
+      var(--chip) 0%,
+      oklch(68% 0.15 45 / 0.18) 50%,
+      var(--chip) 100%);
+    background-size: 200% 100%;
+    animation: m-shimmer-bg 1.4s ease-in-out infinite;
   }
-  @keyframes scan{
-    0%,100%{ transform: translateY(-40%); opacity:.3 }
-    50%{ transform: translateY(40%); opacity:1 }
-  }
+  .m-shimmer { animation: pulse 1.4s ease-in-out infinite; }
+
+  /* m-scan-frame / m-scan-window / m-scan-line 제거 (사용자 요청 — 카메라 풀뷰) */
   .m-scan-bottom{ display: flex; justify-content: center; gap: 14px; }
   .m-scan-btn{
     width: 48px; height: 48px; border-radius: 999px;
@@ -382,7 +396,19 @@ function MobilePWA({ tweaks }){
 
   // 택 OCR 결과 (Gemini Vision으로 추출한 상품 정보)
   const [tagInfo, setTagInfo] = useState(null);  // { brand, model, size, color, price, currency, ... } | null
+  // 사용자가 편집한 PC 전송 페이로드 — tagInfo가 바뀌면 자동 리셋됨
+  // { title, brand, model, modelCode, feature } — null이면 기본값(tagInfo에서 파생)
+  const [editedPayload, setEditedPayload] = useState(null);
   const [ocrLoading, setOcrLoading] = useState(false);
+  // 백그라운드 SKU → 제품명 조회 진행 중 (lookupProductName)
+  const [lookupLoading, setLookupLoading] = useState(false);
+  // 택 분석 직후 캡처된 사진 (Blob URL) — 카메라 영역에 오버레이로 표시
+  // null이면 라이브 카메라 그대로
+  const [capturedPreview, setCapturedPreview] = useState(null);
+
+  // 시세 조회 결과 (Gemini grounding)
+  const [priceSearch, setPriceSearch] = useState(null); // { quotes: [], sources: [] } | null
+  const [priceLoading, setPriceLoading] = useState(false);
 
   const [toast, setToast] = useState(null);
   function showToast(msg) {
@@ -421,10 +447,40 @@ function MobilePWA({ tweaks }){
   useEffect(() => { saveJson(LS_KEY_FXMETA, fxMeta); }, [fxMeta]);
   useEffect(() => { saveJson(LS_KEY_HISTORY, history); }, [history]);
 
+  // 캡처 프리뷰 URL — 컴포넌트 unmount 또는 탭 이동 시 정리 (메모리 누수 방지)
+  useEffect(() => {
+    return () => {
+      if (capturedPreview) URL.revokeObjectURL(capturedPreview);
+    };
+  }, [capturedPreview]);
+
+  // tagInfo 갱신 시 editedPayload 자동 리셋 (OCR 결과 새로 들어오면 편집값 초기화)
+  useEffect(() => {
+    if (!tagInfo) {
+      setEditedPayload(null);
+      return;
+    }
+    setEditedPayload({
+      title: tagInfo.fullName
+        ? tagInfo.fullName
+        : [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim(),
+      brand: tagInfo.brand || '',
+      model: tagInfo.model || '',
+      modelCode: tagInfo.modelCode || '',
+      feature: [
+        tagInfo.size && `사이즈 ${tagInfo.size}`,
+        tagInfo.color,
+      ].filter(Boolean).join(', '),
+    });
+  }, [tagInfo]);
+
+  // 카메라 자동 재시도 카운터 (검은화면 감지 시 자동 증가, 최대 3회)
+  const [restartCounter, setRestartCounter] = useState(0);
+  const retryCountRef = useRef(0);
+
   // ─── 카메라 라이프사이클 ───
-  // 'scan' 탭 + facingMode 변경 시 카메라 (재)시작.
+  // 'scan' 탭 + facingMode/restartCounter 변경 시 카메라 (재)시작.
   // 다른 탭 가면 즉시 정지 (배터리/프라이버시).
-  // 디코드 루프 없이 단순 라이브 프리뷰만 — [택 분석] 또는 [사진] 클릭 시 한 프레임 캡처.
   useEffect(() => {
     if (tab !== 'scan') {
       if (cameraStreamRef.current) {
@@ -432,19 +488,29 @@ function MobilePWA({ tweaks }){
         cameraStreamRef.current = null;
       }
       setCameraState('idle');
+      retryCountRef.current = 0;
+      // 탭 이동 시 캡처 프리뷰도 정리 (메모리 + 다음 진입 시 라이브 카메라부터)
+      if (capturedPreview) {
+        URL.revokeObjectURL(capturedPreview);
+        setCapturedPreview(null);
+      }
       return;
     }
     let alive = true;
+    let watchdogTimer = null;
+
     (async () => {
       if (!videoRef.current) return;
-      // 기존 스트림 먼저 정리 (facingMode 전환 시 충돌 방지)
+      // 기존 스트림 정리
       if (cameraStreamRef.current) {
         cameraStreamRef.current.getTracks().forEach((t) => t.stop());
         cameraStreamRef.current = null;
       }
+      // DOM 안정화 짧은 지연 (video 엘리먼트 mount 보장)
+      await new Promise((r) => setTimeout(r, 50));
+      if (!alive) return;
+
       setCameraState('permission');
-      // 1차: exact 제약 — 디바이스가 해당 카메라 보유 시 무조건 그쪽
-      // 2차: ideal 제약 폴백 — 단일 카메라 디바이스 등 대응
       const tryGetStream = async (mode) => {
         try {
           return await navigator.mediaDevices.getUserMedia({
@@ -458,16 +524,55 @@ function MobilePWA({ tweaks }){
           });
         }
       };
+
       try {
         const stream = await tryGetStream(facingMode);
         if (!alive) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
+        const video = videoRef.current;
+        video.srcObject = stream;
+        await video.play().catch(() => {});
         cameraStreamRef.current = stream;
-        setCameraState('ready');
+
+        // ── 검은화면 감지 watchdog ──
+        // 2초마다 videoWidth 체크. 0이면 재시작 (최대 3회).
+        // playing 이벤트는 신뢰성 낮아서 (iOS Safari에서 frame 없이도 fire) 안 씀
+        const checkAndStartIfReady = () => {
+          if (!alive) return;
+          const v = videoRef.current;
+          if (v && v.videoWidth > 0 && v.videoHeight > 0) {
+            retryCountRef.current = 0; // 성공 → 재시도 카운트 리셋
+            setCameraState('ready');
+          } else if (retryCountRef.current < 3) {
+            // 검은화면 — 자동 재시도
+            retryCountRef.current += 1;
+            console.warn(`[camera] black screen detected (retry ${retryCountRef.current}/3)`);
+            setRestartCounter((c) => c + 1);
+          } else {
+            // 3회 실패 → 에러 표시
+            setCameraError('카메라가 시작되지 않습니다. 페이지를 새로고침하거나 카메라 권한을 확인하세요.');
+            setCameraState('error');
+            retryCountRef.current = 0;
+          }
+        };
+
+        // 첫 체크는 2초 후 (iOS는 첫 프레임 늦게 옴)
+        watchdogTimer = setTimeout(checkAndStartIfReady, 2000);
+
+        // 빠른 경로: video가 프레임 받자마자 ready (watchdog 대기 안 함)
+        const fastCheck = () => {
+          if (!alive) return;
+          const v = videoRef.current;
+          if (v && v.videoWidth > 0) {
+            if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+            retryCountRef.current = 0;
+            setCameraState('ready');
+          }
+        };
+        video.addEventListener('loadedmetadata', fastCheck, { once: true });
+        video.addEventListener('playing', fastCheck, { once: true });
       } catch (e) {
         if (alive) {
           setCameraError(e?.message || String(e));
@@ -475,19 +580,21 @@ function MobilePWA({ tweaks }){
         }
       }
     })();
+
     return () => {
       alive = false;
+      if (watchdogTimer) clearTimeout(watchdogTimer);
       if (cameraStreamRef.current) {
         cameraStreamRef.current.getTracks().forEach((t) => t.stop());
         cameraStreamRef.current = null;
       }
     };
-  }, [tab, facingMode]);
+  }, [tab, facingMode, restartCounter]);
 
-  // 카메라 전환 — facingMode state 토글 → useEffect가 알아서 재시작
+  // 카메라 전환 — facingMode 토글 + 재시도 카운트 리셋
   function handleSwitchCamera() {
+    retryCountRef.current = 0;
     setFacingMode((m) => (m === 'environment' ? 'user' : 'environment'));
-    // toast로 즉시 피드백
     showToast(facingMode === 'environment' ? '전면 카메라' : '후면 카메라');
   }
 
@@ -538,56 +645,133 @@ function MobilePWA({ tweaks }){
     e.target.value = '';
   }
 
-  async function handleCapturePhoto() {
-    if (cameraState !== 'ready') {
-      showToast('카메라가 활성화되지 않았습니다');
-      return;
-    }
-    const blob = await captureFrameToBlob(videoRef.current);
-    if (!blob) {
-      showToast('캡처 실패');
-      return;
-    }
-    setPhotos(prev => [...prev, blob].slice(-6));
-    showToast(`사진 저장됨 · ${Math.min(photos.length + 1, 6)}/6`);
-    if (navigator.vibrate) navigator.vibrate(40);
+  // 캡처된 분석용 Blob 보관 (확인 후 Gemini 전송용)
+  const pendingBlobRef = useRef(null);
+
+  // 캡처 프리뷰 해제 — 재촬영 모드로 (카메라 다시 라이브)
+  function clearCapturedPreview() {
+    setCapturedPreview((url) => {
+      if (url) URL.revokeObjectURL(url);
+      return null;
+    });
+    pendingBlobRef.current = null;
   }
 
-  // ── 택 분석 — Gemini Vision으로 사진에서 브랜드/모델/사이즈/가격 추출 ──
-  async function handleAnalyzeTag() {
+  // ── 1단계: 택 사진 찍기 (캡처만, 분석은 다음 단계) ──
+  // 사진 잘못 찍히면 API 낭비라 사용자가 확인 후 분석 결정
+  async function handleCaptureTag() {
     if (ocrLoading) return;
     if (cameraState !== 'ready') {
       showToast('카메라가 활성화되지 않았습니다');
+      return;
+    }
+    // OCR용 캡처는 1280px로 축소 — 업로드 70% ↓, Gemini 처리도 빨라짐
+    const blob = await captureFrameToBlob(videoRef.current, 1280, 0.85);
+    if (!blob) {
+      showToast('사진 캡처 실패');
+      return;
+    }
+    // 기존 preview 정리 후 새 사진 표시
+    if (capturedPreview) URL.revokeObjectURL(capturedPreview);
+    setCapturedPreview(URL.createObjectURL(blob));
+    pendingBlobRef.current = blob;
+    if (navigator.vibrate) navigator.vibrate(40);
+  }
+
+  // ── 2단계: 캡처된 사진으로 분석 진행 (사용자 확인 후) ──
+  async function handleAnalyzeTag() {
+    if (ocrLoading) return;
+    const blob = pendingBlobRef.current;
+    if (!blob) {
+      showToast('먼저 택 사진을 찍으세요');
       return;
     }
     if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
       showToast('설정에서 Gemini API 키를 입력하세요');
       return;
     }
-    const blob = await captureFrameToBlob(videoRef.current);
-    if (!blob) {
-      showToast('사진 캡처 실패');
-      return;
-    }
-    // 캡처한 사진은 ocr 결과와 별개로 사진 목록에도 추가 (확장으로 보낼 때 사용)
-    setPhotos(prev => [...prev, blob].slice(-6));
     setOcrLoading(true);
     try {
       const info = await extractFromTagImage(blob, settings.geminiApiKey);
-      setTagInfo(info);
-      // 검색어를 자동으로 "브랜드 + 모델"로 채우기
-      const composed = [info.brand, info.model].filter(Boolean).join(' ').trim();
-      if (composed) {
-        setSearchQuery(composed);
-        saveJson(LS_KEY_LAST_QUERY, composed);
+
+      // 사이즈 한국식 mm로 자동 변환 (US/UK/EU/cm → mm)
+      // 사이즈 차트는 표준이라 하드코딩이 정답 (src/lib/size.ts)
+      if (info.size) {
+        const parsed = parseSize(info.size);
+        if (parsed.mm !== null) {
+          // 변환 성공 → tagInfo.size를 한국 mm 표기로 교체, 원본은 sizeOriginal에 보관
+          info.sizeOriginal = info.size;
+          info.size = parsed.korean; // '270mm'
+          info.sizeMm = parsed.mm;   // 270
+          info.sizeSource = parsed.source; // 'us'/'eu'/...
+        }
       }
+
+      setTagInfo(info);
+
       // 가격 정보 있으면 마진 계산용 cost로도 채워주기
       if (info.price && info.currency) {
         setCost(info.price);
         setCostCurrency(info.currency);
       }
-      showToast(`택 분석 완료 — ${composed || info.brand || '결과 확인'}`);
-      if (navigator.vibrate) navigator.vibrate(60);
+
+      // ── 검색어 자동 채움 ──
+      // 핵심: SKU(modelCode)가 있으면 model 있어도 항상 lookup 실행
+      // 이유: 같은 제품군이라도 SKU별로 색상/에디션이 다 달라서
+      //   "Nike Daybreak"로만 검색하면 수십 종 섞임 →
+      //   "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지" 같은 풀네임 필요
+      const hasModel = info.model && info.brand && info.model.toLowerCase() !== info.brand.toLowerCase();
+
+      // 1단계: 즉시 표시할 임시 검색어 (lookup 결과 오기 전)
+      let initial = '';
+      if (info.brand && hasModel) {
+        initial = `${info.brand} ${info.model}`.trim();
+      } else if (info.brand && info.modelCode) {
+        initial = `${info.brand} ${info.modelCode}`.trim();
+      } else if (info.brand) {
+        initial = info.brand.trim();
+      } else if (info.modelCode) {
+        initial = info.modelCode.trim();
+      }
+      if (initial) {
+        setSearchQuery(initial);
+        saveJson(LS_KEY_LAST_QUERY, initial);
+      }
+
+      // 2단계: SKU 있으면 무조건 백그라운드 lookup으로 풀네임 보강
+      if (info.brand && info.modelCode) {
+        showToast(hasModel
+          ? `택 분석 완료 — ${initial} (색상 정보 추가 조회 중...)`
+          : `택 분석 — 제품명 자동 조회 중...`);
+        if (navigator.vibrate) navigator.vibrate(60);
+        setLookupLoading(true);
+        lookupProductName(info.brand, info.modelCode, settings.geminiApiKey)
+          .then((lookup) => {
+            if (!lookup || !lookup.fullName) return;
+            // OCR이 알려준 model보다 lookup의 fullName이 더 상세 (색상 포함) → 교체
+            setSearchQuery(lookup.fullName);
+            saveJson(LS_KEY_LAST_QUERY, lookup.fullName);
+            setTagInfo((prev) => prev ? {
+              ...prev,
+              // OCR model("Daybreak")보다 lookup shortName("데이브레이크")이 한국어로 더 좋음
+              // shortName 없으면 fullName 그대로
+              model: lookup.shortName || lookup.fullName,
+              color: prev.color || lookup.colorway,
+              fullName: lookup.fullName,
+            } : prev);
+            showToast(`제품명 보강 — ${lookup.fullName.length > 30 ? lookup.fullName.slice(0, 30) + '...' : lookup.fullName}`);
+          })
+          .catch((err) => console.warn('[lookupProductName] 실패:', err))
+          .finally(() => setLookupLoading(false));
+      } else {
+        // SKU 없는 경우 — lookup 불가, OCR 결과 그대로 사용
+        if (initial) {
+          showToast(`택 분석 완료 — ${initial}${!hasModel ? ' (제품명 직접 입력 권장)' : ''}`);
+          if (navigator.vibrate) navigator.vibrate(60);
+        } else {
+          showToast(`택 분석 완료 — 결과 확인`);
+        }
+      }
     } catch (e) {
       const msg = e?.message || String(e);
       if (msg === 'GEMINI_NO_KEY') showToast('Gemini API 키 누락');
@@ -609,6 +793,37 @@ function MobilePWA({ tweaks }){
     openSearchTab(siteCode, q);
   }
 
+  // ── 시세 조회 — Gemini의 google_search grounding으로 마켓플레이스별 가격 자동 조사 ──
+  async function handleSearchPrices() {
+    if (priceLoading) return;
+    const q = (searchQuery || '').trim();
+    if (!q) { showToast('검색어가 비어있습니다'); return; }
+    if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
+      showToast('설정에서 Gemini API 키를 입력하세요');
+      return;
+    }
+    setPriceLoading(true);
+    setPriceSearch(null);
+    try {
+      const result = await searchPricesViaGemini(q, settings.geminiApiKey);
+      setPriceSearch(result);
+      if (result.quotes.length === 0) {
+        showToast('시세를 찾지 못했습니다 — 검색어 더 구체적으로');
+      } else {
+        showToast(`${result.quotes.length}건 시세 조회 완료`);
+        if (navigator.vibrate) navigator.vibrate(40);
+      }
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === 'GEMINI_NO_KEY') showToast('Gemini API 키 누락');
+      else if (msg.startsWith('GEMINI_HTTP_')) showToast('Gemini API 오류: ' + msg);
+      else if (msg === 'GEMINI_PARSE_ERROR') showToast('응답 파싱 실패 — 다시 시도');
+      else showToast('시세 조회 실패: ' + msg);
+    } finally {
+      setPriceLoading(false);
+    }
+  }
+
   function jumpToMargin() {
     setTab('margin');
   }
@@ -622,23 +837,19 @@ function MobilePWA({ tweaks }){
       showToast('보낼 정보가 없습니다');
       return;
     }
-    // 페이로드 — 확장 사이드패널의 Product 형태로 매핑
+    // 페이로드 — editedPayload(사용자 편집값) 우선 사용
+    const ep = editedPayload || {};
     const payload = {
       v: 1, // 스키마 버전
-      title: tagInfo
-        ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim()
-        : (searchQuery || ''),
-      brand: tagInfo?.brand,
-      model: tagInfo?.model,
-      modelCode: tagInfo?.modelCode,
-      // 사이드패널 AI 입력란용 feature 필드에 합치기 (사이즈/색상 등 분류 안 된 텍스트)
-      feature: [tagInfo?.size && `사이즈 ${tagInfo.size}`, tagInfo?.color]
-        .filter(Boolean).join(', '),
+      title: ep.title || searchQuery || '',
+      brand: ep.brand || undefined,
+      model: ep.model || undefined,
+      modelCode: ep.modelCode || undefined,
+      feature: ep.feature || undefined,
       cost: cost || tagInfo?.price || 0,
       costCurrency: costCurrency || tagInfo?.currency || 'KRW',
       price: price || 0,
       priceCurrency: 'KRW',
-      // 사진은 URL 한계로 못 담음 — Phase 8 백엔드 큐로 별도 처리
       photoCount: photos.length,
     };
     const json = JSON.stringify(payload);
@@ -688,6 +899,36 @@ function MobilePWA({ tweaks }){
       showToast('URL 복사됨 — PC에 붙여넣어 열기');
     } catch {
       showToast('복사 실패 — URL: ' + text.slice(0, 50) + '...');
+    }
+  }
+
+  // ── JSON만 복사 — 수동으로 보내고 싶거나 다른 도구에 붙여넣을 때 ──
+  async function handleCopyJson() {
+    // editedPayload 우선 사용 (사용자 편집 반영)
+    const ep = editedPayload || {};
+    const payload = {
+      v: 1,
+      title: ep.title || searchQuery || undefined,
+      brand: ep.brand || undefined,
+      model: ep.model || undefined,
+      modelCode: ep.modelCode || undefined,
+      feature: ep.feature || undefined,
+      cost: cost || tagInfo?.price || undefined,
+      costCurrency: cost || tagInfo?.price ? (costCurrency || tagInfo?.currency || 'KRW') : undefined,
+      price: price || undefined,
+      priceCurrency: price ? 'KRW' : undefined,
+      photoCount: photos.length || undefined,
+    };
+    // undefined 키 제거
+    const cleaned = Object.fromEntries(
+      Object.entries(payload).filter(([_, v]) => v !== undefined && v !== '')
+    );
+    const json = JSON.stringify(cleaned, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      showToast('JSON 복사됨');
+    } catch {
+      showToast('복사 실패');
     }
   }
 
@@ -767,68 +1008,118 @@ function MobilePWA({ tweaks }){
             <div className="m-scan">
               <video ref={videoRef} className="m-scan-video" autoPlay muted playsInline />
 
-              {cameraState === 'error' && (
+              {/* 캡처된 택 사진 오버레이 — 분석 후엔 라이브 카메라 가리고 사진 표시 */}
+              {capturedPreview && (
+                <img
+                  src={capturedPreview}
+                  alt="분석 중인 택 사진"
+                  style={{
+                    position:'absolute', inset:0, width:'100%', height:'100%',
+                    objectFit:'cover', zIndex:1, background:'#000',
+                  }}
+                />
+              )}
+
+              {cameraState === 'error' && !capturedPreview && (
                 <div className="m-scan-perm">
                   <div>카메라 권한이 거부됐거나 사용할 수 없습니다.</div>
                   <div style={{fontSize:11.5, opacity:.7}}>{cameraError}</div>
                   <button onClick={() => { setTab('margin'); setTimeout(()=>setTab('scan'), 50); }}>다시 시도</button>
                 </div>
               )}
-              {cameraState === 'permission' && (
+              {cameraState === 'permission' && !capturedPreview && (
                 <div className="m-scan-perm">카메라 권한 요청 중...</div>
               )}
 
-              {/* 모서리 마커만 (스캔 라인 없음 — 더 이상 바코드 디코드 X) */}
-              {cameraState === 'ready' && (
-                <div className="m-scan-frame">
-                  <div className="m-scan-window"><i/><b/></div>
-                </div>
-              )}
-
-              <div className="m-scan-overlay">
+              <div className="m-scan-overlay" style={{zIndex:2}}>
                 <div className="m-scan-top">
                   <div className="m-scan-pill">
                     <span className="live"/>
-                    {cameraState === 'ready' ? '카메라 준비' : cameraState === 'permission' ? '권한 요청 중' : '대기'}
+                    {capturedPreview
+                      ? '분석한 사진'
+                      : cameraState === 'ready' ? '카메라 준비'
+                      : cameraState === 'permission' ? '권한 요청 중' : '대기'}
                   </div>
                   <div style={{display:'flex', gap:6}}>
-                    <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환"><MIcon.flip/></button>
+                    {!capturedPreview && (
+                      <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환">
+                        <MIcon.flip/>
+                      </button>
+                    )}
                   </div>
                 </div>
-                <div className="m-scan-bottom" style={{gap:14, alignItems:'center'}}>
-                  {/* 사진 추가 (왼쪽 보조) — 등록용 사진 캡처만, OCR 안 함 */}
-                  <button
-                    className="m-scan-btn"
-                    onClick={handleCapturePhoto}
-                    title="사진 추가 (등록용)"
-                    style={{width:54, height:54}}>
-                    <MIcon.camera s={20}/>
-                  </button>
-
-                  {/* 택 분석 (가운데, 메인) — OCR로 상품 정보 자동 채움 */}
-                  <button
-                    onClick={handleAnalyzeTag}
-                    disabled={ocrLoading}
-                    title="택 사진 분석 → 브랜드/모델/사이즈/가격 자동 추출"
-                    style={{
-                      width:74, height:74, borderRadius:'50%',
-                      background: ocrLoading ? 'rgba(255,255,255,.4)' : 'var(--accent)',
-                      border:'4px solid rgba(255,255,255,.35)',
-                      color:'white', fontFamily:'inherit',
-                      display:'flex', alignItems:'center', justifyContent:'center',
-                      fontSize: ocrLoading ? 24 : 12, fontWeight:700,
-                      letterSpacing:'-.02em', lineHeight:1,
-                      boxShadow: '0 4px 16px oklch(68% 0.15 45 / 0.4)',
-                      opacity: ocrLoading ? 0.7 : 1,
-                    }}>
-                    {ocrLoading ? '⏳' : <span>택<br/>분석</span>}
-                  </button>
-
-                  {/* 자리맞춤용 빈 공간 */}
-                  <div style={{width:54}}/>
+                <div className="m-scan-bottom" style={{justifyContent:'center', alignItems:'center', gap:14}}>
+                  {!capturedPreview ? (
+                    /* 라이브 모드: 셔터 버튼 (택 사진 캡처만) */
+                    <button
+                      onClick={handleCaptureTag}
+                      title="택 사진 찍기 (찍은 후 분석 여부 확인)"
+                      style={{
+                        width:84, height:84, borderRadius:'50%',
+                        background:'var(--accent)',
+                        border:'4px solid rgba(255,255,255,.35)',
+                        color:'white', fontFamily:'inherit',
+                        display:'flex', alignItems:'center', justifyContent:'center',
+                        fontSize:13, fontWeight:700,
+                        letterSpacing:'-.02em', lineHeight:1,
+                        boxShadow:'0 4px 16px oklch(68% 0.15 45 / 0.4)',
+                      }}>
+                      <span>택<br/>찍기</span>
+                    </button>
+                  ) : (
+                    /* 프리뷰 모드: [↺ 재촬영] + [✅ 이 사진으로 분석] */
+                    <>
+                      <button
+                        onClick={clearCapturedPreview}
+                        disabled={ocrLoading}
+                        title="다시 찍기"
+                        style={{
+                          height:56, padding:'0 20px', borderRadius:28,
+                          background:'rgba(255,255,255,.95)', color:'var(--ink)',
+                          border:'2px solid rgba(255,255,255,.35)',
+                          fontFamily:'inherit', fontSize:14, fontWeight:700,
+                          display:'flex', alignItems:'center', gap:6,
+                          opacity: ocrLoading ? 0.5 : 1,
+                        }}>
+                        ↺ 재촬영
+                      </button>
+                      <button
+                        onClick={handleAnalyzeTag}
+                        disabled={ocrLoading}
+                        title="이 사진으로 분석 — Gemini Vision 호출"
+                        style={{
+                          height:56, padding:'0 22px', borderRadius:28,
+                          background: ocrLoading ? 'rgba(255,255,255,.4)' : 'var(--accent)',
+                          color:'white', border:'2px solid rgba(255,255,255,.35)',
+                          fontFamily:'inherit', fontSize:14, fontWeight:700,
+                          display:'flex', alignItems:'center', gap:6,
+                          boxShadow:'0 4px 16px oklch(68% 0.15 45 / 0.4)',
+                          opacity: ocrLoading ? 0.7 : 1,
+                        }}>
+                        {ocrLoading ? <><span className="m-spin">⟳</span> 분석 중</> : <>✓ 이 사진으로 분석</>}
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
+
+            {/* 진행 중 배너 — OCR 또는 후속 lookup 진행 중일 때 명확한 시각 피드백 */}
+            {(ocrLoading || lookupLoading) && (
+              <div className="m-shimmer-bg" style={{
+                display:'flex', alignItems:'center', gap:10,
+                padding:'10px 14px', borderRadius:12, marginBottom:12,
+                fontSize:12.5, fontWeight:600, color:'var(--ink)',
+                border:'1px solid var(--accent)',
+              }}>
+                <span className="m-spin" style={{fontSize:16, color:'var(--accent)'}}>⟳</span>
+                <span>
+                  {ocrLoading
+                    ? '택 사진 분석 중... (OCR로 브랜드·모델·사이즈·가격 추출)'
+                    : '제품명 자동 조회 중... (SKU로 한국어 풀네임 보강)'}
+                </span>
+              </div>
+            )}
 
             {/* 택 분석 결과 + 검색 + 확장 전송 (하나의 카드에 통합) */}
             {(tagInfo || searchQuery) && (
@@ -838,8 +1129,16 @@ function MobilePWA({ tweaks }){
                   <>
                     <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:8}}>
                       <span className="m-chip accent" style={{fontSize:11}}>📷 택 분석 결과</span>
+                      {lookupLoading && (
+                        <span className="m-shimmer" style={{
+                          fontSize:10.5, color:'var(--accent)', fontWeight:600,
+                          display:'flex', alignItems:'center', gap:4,
+                        }}>
+                          <span className="m-spin">⟳</span> 제품명 조회 중
+                        </span>
+                      )}
                       <button
-                        onClick={() => { setTagInfo(null); setSearchQuery(''); }}
+                        onClick={() => { setTagInfo(null); setSearchQuery(''); clearCapturedPreview(); }}
                         style={{marginLeft:'auto', border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer', padding:'2px 6px'}}>
                         지우기
                       </button>
@@ -851,7 +1150,14 @@ function MobilePWA({ tweaks }){
                     )}
                     <div style={{display:'flex', flexWrap:'wrap', gap:5, marginBottom:12}}>
                       {tagInfo.modelCode && <span className="m-chip">코드 {tagInfo.modelCode}</span>}
-                      {tagInfo.size && <span className="m-chip">사이즈 {tagInfo.size}</span>}
+                      {tagInfo.size && (
+                        <span className="m-chip" title={tagInfo.sizeOriginal && tagInfo.sizeOriginal !== tagInfo.size ? `원본: ${tagInfo.sizeOriginal}` : undefined}>
+                          사이즈 {tagInfo.size}
+                          {tagInfo.sizeOriginal && tagInfo.sizeOriginal !== tagInfo.size && (
+                            <span style={{opacity:.6, marginLeft:3}}>· {tagInfo.sizeOriginal}</span>
+                          )}
+                        </span>
+                      )}
                       {tagInfo.color && <span className="m-chip">{tagInfo.color}</span>}
                       {tagInfo.price && tagInfo.currency && (
                         <span className="m-chip success">
@@ -869,7 +1175,8 @@ function MobilePWA({ tweaks }){
                   <label style={{fontSize:11, fontWeight:500, color:'var(--ink-2)', display:'block', marginBottom:4}}>
                     검색어 <span style={{color:'var(--ink-3)', fontWeight:400}}>(직접 편집 가능)</span>
                   </label>
-                  <div className="m-num" style={{padding:'2px 12px'}}>
+                  <div className={`m-num ${lookupLoading ? 'm-shimmer-bg' : ''}`}
+                    style={{padding:'2px 12px'}}>
                     <input
                       type="text"
                       value={searchQuery}
@@ -894,30 +1201,111 @@ function MobilePWA({ tweaks }){
                   )}
                 </div>
 
-                {/* 멀티 사이트 검색 버튼 */}
-                <div style={{display:'grid', gridTemplateColumns:'repeat(2, 1fr)', gap:6, marginBottom:10}}>
-                  {SITE_PRESETS['sourcing-kr'].map(siteCode => {
-                    const meta = SITES[siteCode];
-                    return (
-                      <button
-                        key={siteCode}
-                        className="m-btn"
-                        onClick={() => handleSiteSearch(siteCode)}
-                        title={meta.hint}
-                        style={{padding:'12px 10px', fontSize:13, justifyContent:'flex-start', gap:6}}>
-                        <span style={{fontSize:15}}>{meta.emoji}</span>
-                        <span>{meta.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
+                {/* 시세 조회 — Gemini google_search grounding으로 마켓플레이스별 가격 자동 조사 */}
+                <button
+                  className="m-btn primary"
+                  onClick={handleSearchPrices}
+                  disabled={priceLoading || !searchQuery.trim()}
+                  style={{marginBottom:10}}>
+                  {priceLoading ? '⏳ 시세 조사 중...' : '🔍 마켓플레이스 시세 조사'}
+                </button>
 
+                {/* 시세 결과 — 마켓플레이스별 카드 */}
+                {priceSearch && priceSearch.quotes.length > 0 && (
+                  <div style={{marginBottom:12}}>
+                    <div style={{
+                      fontSize:10.5, fontWeight:700, color:'var(--ink-3)',
+                      textTransform:'uppercase', letterSpacing:'.08em', marginBottom:6,
+                      display:'flex', alignItems:'center', justifyContent:'space-between',
+                    }}>
+                      <span>시세 ({priceSearch.quotes.length}건)</span>
+                      <button onClick={() => setPriceSearch(null)}
+                        style={{border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer'}}>
+                        지우기
+                      </button>
+                    </div>
+                    <div style={{display:'flex', flexDirection:'column', gap:6}}>
+                      {priceSearch.quotes.map((q, i) => (
+                        <a key={i}
+                          href={
+                            q.url
+                              ? q.url
+                              // Vertex URL은 이미 라이브러리에서 제거됨 → q.title이 있으면 마켓플레이스 + 제목으로 Google 검색 fallback
+                              : `https://www.google.com/search?q=${encodeURIComponent((q.title || searchQuery) + ' ' + q.marketplace)}`
+                          }
+                          target="_blank"
+                          rel="noopener"
+                          title={q.url ? '실제 listing 열기' : '제목 + 마켓플레이스로 Google 검색'}
+                          style={{
+                            display:'flex', alignItems:'center', gap:8,
+                            padding:'10px 12px', borderRadius:10,
+                            background:'var(--surface)', border:'1px solid var(--line)',
+                            textDecoration:'none', color:'var(--ink)',
+                          }}>
+                          <div style={{flex:1, minWidth:0}}>
+                            <div style={{fontSize:12.5, fontWeight:600, letterSpacing:'-.01em'}}>
+                              {q.marketplace}
+                              {q.recency && (
+                                <span style={{fontSize:10, color:'var(--ink-3)', fontWeight:400, marginLeft:6}}>
+                                  · {q.recency}
+                                </span>
+                              )}
+                            </div>
+                            {q.title && (
+                              <div style={{fontSize:11, color:'var(--ink-3)', marginTop:2,
+                                whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>
+                                {q.title}
+                              </div>
+                            )}
+                          </div>
+                          <div style={{
+                            fontFamily:'JetBrains Mono, monospace', fontWeight:700, fontSize:14,
+                            color:'var(--ink)', fontVariantNumeric:'tabular-nums',
+                          }}>
+                            {q.currency === 'KRW' ? '₩' : q.currency === 'JPY' ? '¥' : '$'}
+                            {q.price.toLocaleString()}
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                    {priceSearch.sources.length > 0 && (
+                      <details style={{marginTop:6}}>
+                        <summary style={{fontSize:10.5, color:'var(--ink-3)', cursor:'pointer'}}>
+                          출처 {priceSearch.sources.length}건
+                        </summary>
+                        <div style={{fontSize:10.5, color:'var(--ink-3)', marginTop:6, lineHeight:1.6}}>
+                          {/* Vertex grounding URI는 자주 만료되어 404 → 제목으로 Google 검색 fallback */}
+                          {priceSearch.sources.slice(0, 8).map((s, i) => {
+                            const text = s.title || s.uri;
+                            const fallbackHref = s.title
+                              ? `https://www.google.com/search?q=${encodeURIComponent(s.title)}`
+                              : s.uri;
+                            return (
+                              <div key={i} style={{marginBottom:4}}>
+                                <a href={fallbackHref} target="_blank" rel="noopener"
+                                  title="제목으로 Google 재검색 (grounding URL은 자주 만료됨)"
+                                  style={{color:'var(--ink-2)', wordBreak:'break-word', textDecoration:'none'}}>
+                                  · {text.length > 70 ? text.slice(0, 70) + '...' : text}
+                                </a>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{fontSize:9.5, color:'var(--ink-3)', marginTop:6, opacity:.7}}>
+                          ⓘ grounding URL은 짧게 만료됨 — 제목으로 Google 재검색
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                )}
+
+                {/* 보조 — 사이트 직접 열기 (시세 못 찾았을 때 fallback) */}
                 <details style={{marginBottom:10}}>
                   <summary style={{fontSize:11, color:'var(--ink-3)', cursor:'pointer', padding:'4px 0'}}>
-                    더 많은 검색 (아마존JP / 요도바시 / 구글)
+                    사이트 직접 열기 (번장·당근·쿠팡·메루카리·아마존JP·요도바시)
                   </summary>
-                  <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:6, marginTop:6}}>
-                    {['amazonJp', 'yodobashi', 'google'].map(siteCode => {
+                  <div style={{display:'grid', gridTemplateColumns:'repeat(2, 1fr)', gap:6, marginTop:6}}>
+                    {[...SITE_PRESETS['sourcing-kr'], 'amazonJp', 'yodobashi', 'google'].map(siteCode => {
                       const meta = SITES[siteCode];
                       return (
                         <button
@@ -935,10 +1323,85 @@ function MobilePWA({ tweaks }){
                 </details>
 
                 {/* 액션 버튼들 */}
+                {/* 보낼 정보 미리보기 — 사용자가 뭘 보내는지 명확히 확인 */}
+                {(tagInfo || searchQuery || cost || price) && (
+                  <details style={{marginBottom:8}} open>
+                    <summary style={{
+                      fontSize:10.5, fontWeight:700, color:'var(--ink-3)',
+                      textTransform:'uppercase', letterSpacing:'.08em', cursor:'pointer',
+                      marginBottom:6,
+                    }}>
+                      📋 PC로 보낼 정보 <span style={{color:'var(--ink-3)', fontWeight:400, marginLeft:4}}>(편집 가능)</span>
+                    </summary>
+                    <div style={{
+                      background:'var(--chip)', borderRadius:8, padding:'10px 12px',
+                      fontSize:11.5, color:'var(--ink-2)',
+                      display:'flex', flexDirection:'column', gap:6,
+                    }}>
+                      {(() => {
+                        const sym = costCurrency === 'KRW' ? '₩' : costCurrency === 'JPY' ? '¥' : '$';
+                        const update = (field, value) => {
+                          setEditedPayload((p) => ({ ...(p || {}), [field]: value }));
+                        };
+                        const inputStyle = {
+                          flex:1, minWidth:0,
+                          border:'1px solid var(--line-2)', borderRadius:6,
+                          padding:'5px 8px', fontSize:11.5, color:'var(--ink)',
+                          background:'var(--surface)', fontFamily:'inherit',
+                          outline:'none',
+                        };
+                        const labelStyle = {
+                          color:'var(--ink-3)', minWidth:54, fontSize:10.5, paddingTop:6,
+                        };
+                        const fields = [
+                          ['title', '제목'],
+                          ['brand', '브랜드'],
+                          ['model', '모델'],
+                          ['modelCode', '모델코드'],
+                          ['feature', '특징'],
+                        ];
+                        return (
+                          <>
+                            {fields.map(([key, label]) => (
+                              <div key={key} style={{display:'flex', gap:8, alignItems:'flex-start'}}>
+                                <span style={labelStyle}>{label}:</span>
+                                <input
+                                  type="text"
+                                  value={(editedPayload?.[key]) ?? ''}
+                                  placeholder={`(${label} 없음)`}
+                                  onChange={(e) => update(key, e.target.value)}
+                                  style={inputStyle}
+                                />
+                              </div>
+                            ))}
+                            {/* 원가/판매가/사진은 읽기전용 표시 — 마진 탭이나 캡처에서 따로 관리 */}
+                            <div style={{
+                              fontSize:10.5, color:'var(--ink-3)',
+                              paddingTop:6, marginTop:2, borderTop:'1px dashed var(--line-2)',
+                              lineHeight:1.6,
+                            }}>
+                              {cost > 0 && <div>원가: {sym}{cost.toLocaleString()}</div>}
+                              {price > 0 && <div>판매가: ₩{price.toLocaleString()}</div>}
+                              {photos.length > 0 && <div>사진: {photos.length}장 (Web Share files 동봉)</div>}
+                              <div style={{marginTop:4, opacity:.7}}>
+                                ⓘ 원가/판매가는 마진 탭에서, 사진은 [📷 사진] 또는 [📁 사진 추가]로 변경
+                              </div>
+                            </div>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </details>
+                )}
+
                 <div className="m-action-row" style={{marginBottom:0}}>
                   <button className="m-btn accent" onClick={handleSendToExtension}
-                    title="확장(PC)으로 정보 전달 — 카톡으로 본인에게 보내거나 클립보드로 복사">
+                    title="확장(PC)으로 자동 입력 링크 + 사진 공유 — 카톡/AirDrop으로 본인에게">
                     <MIcon.download s={14}/> PC로 보내기
+                  </button>
+                  <button className="m-btn" onClick={handleCopyJson}
+                    title="JSON 데이터를 클립보드에 복사 (수동 사용용)">
+                    📋 JSON
                   </button>
                   <button className="m-btn primary" onClick={jumpToMargin}>
                     ₩ 마진
@@ -1028,6 +1491,34 @@ function MobilePWA({ tweaks }){
             }}>
               💡 [PC로 보내기]를 누르면 카톡·에어드롭 등으로 사진과 URL을 함께 공유합니다 (지원 환경에서).
               미지원이면 다운로드 후 직접 옮기세요.
+            </div>
+
+            {/* Gemini API 키 — 항상 노출 (택 분석/시세 조사에 필요) */}
+            <div className="m-section-title" style={{marginTop:18}}>
+              <span>Gemini API 키</span>
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener"
+                style={{fontSize:10, color:'var(--accent)', textDecoration:'none', fontWeight:600}}>
+                무료 발급 →
+              </a>
+            </div>
+            <div className="m-card" style={{padding:'12px 14px'}}>
+              <label style={{fontSize:11, color:'var(--ink-3)', display:'block', marginBottom:6}}>
+                택 OCR + 시세 조사에 필요. 무료 1,500회/일.
+              </label>
+              <div className="m-num">
+                <input
+                  type="password"
+                  placeholder="AIza..."
+                  value={settings.geminiApiKey || ''}
+                  onChange={e => setSettings(s => ({...s, geminiApiKey: e.target.value}))}
+                  style={{fontSize:13, fontFamily:'JetBrains Mono, monospace'}}
+                />
+              </div>
+              {settings.geminiApiKey && (
+                <div style={{fontSize:10, color:'var(--success)', marginTop:6}}>
+                  ✓ 키 저장됨 ({settings.geminiApiKey.length}자)
+                </div>
+              )}
             </div>
           </>
         )}
@@ -1145,35 +1636,7 @@ function MobilePWA({ tweaks }){
               </div>
             </div>
 
-            {/* Gemini API 키 — 택 OCR용 */}
-            <div className="m-section-title" style={{marginTop:18}}>
-              <span>Gemini API 키 (택 OCR)</span>
-              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener"
-                style={{fontSize:10, color:'var(--accent)', textDecoration:'none', fontWeight:600}}>
-                무료 발급 →
-              </a>
-            </div>
-            <div className="m-card" style={{padding:'12px 14px'}}>
-              <div className="m-field" style={{marginBottom:0}}>
-                <label style={{fontSize:11, color:'var(--ink-3)'}}>
-                  사진 OCR로 상품 정보 자동 추출 시 사용. 무료 1,500회/일.
-                </label>
-                <div className="m-num" style={{marginTop:6}}>
-                  <input
-                    type="password"
-                    placeholder="AIza..."
-                    value={settings.geminiApiKey || ''}
-                    onChange={e => setSettings(s => ({...s, geminiApiKey: e.target.value}))}
-                    style={{fontSize:13, fontFamily:'JetBrains Mono, monospace'}}
-                  />
-                </div>
-                {settings.geminiApiKey && (
-                  <div style={{fontSize:10, color:'var(--success)', marginTop:6}}>
-                    ✓ 키 저장됨 ({settings.geminiApiKey.length}자) — 스캔 탭의 📷 버튼으로 택 분석 가능
-                  </div>
-                )}
-              </div>
-            </div>
+            {/* Gemini API 키는 스캔 탭 아래쪽으로 이동 (자주 보는 화면이라 접근성 ↑) */}
           </>
         )}
 

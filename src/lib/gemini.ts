@@ -305,27 +305,57 @@ export interface TagInfo {
   brand?: string;
   model?: string;
   modelCode?: string;       // 예: 'DH7568-100' (Nike SKU)
-  size?: string;            // 예: '260' / 'US 9' / 'M'
+  size?: string;            // 한국 mm 표기 (예: '270mm') — 변환 후
+  sizeOriginal?: string;    // 원본 표기 (예: 'US 9') — 검수용
+  sizeMm?: number;          // 숫자 mm (예: 270) — 카테고리 옵션 자동선택용
+  sizeSource?: 'mm' | 'us' | 'uk' | 'eu' | 'cm' | 'unknown';
   color?: string;
   price?: number;
   currency?: 'KRW' | 'JPY' | 'USD';
   category?: string;        // 예: 'sneakers' / 'apparel' / 'cosmetics'
   rawText: string;          // OCR 원본 (사용자 검수용)
+  fullName?: string;        // SKU 조회로 보강된 한국어 풀네임 (브랜드+시리즈+에디션+색상)
 }
 
 const TAG_PROMPT = `당신은 상품 택/라벨 사진을 분석해서 구조화된 정보를 추출하는 OCR 전문가입니다.
 사진에서 보이는 모든 텍스트를 읽고, 그 중 상품 식별에 필요한 정보를 분류해서 JSON으로 반환하세요.
 
 [추출 대상]
-- brand: 브랜드명 (예: Nike, Adidas, Chanel)
-- model: 제품 모델명 (예: Air Force 1 Low, Stan Smith)
-- modelCode: 제품 코드/SKU (예: DH7568-100, ID2773) — 영문+숫자 조합
+- brand: 브랜드명 (예: Nike, Adidas, Chanel) — 회사/제조사 이름
+- model: 제품 라인/시리즈명 (예: Air Force 1, Daybreak, Stan Smith, Cortez, 데이브레이크, デイブレイク)
+  ⭐ 가장 중요한 필드 — 사진 어디든 적혀있으면 반드시 추출.
+  ⚠️ 절대 brand와 같은 값을 model에 쓰지 마세요. brand="Nike"면 model은 "Nike"가 될 수 없음.
+  ⚠️ 한국어/영어/일본어 모두 OK — 보이는 그대로 추출 ("데이브레이크" 또는 "Daybreak" 또는 "デイブレイク")
+  ⚠️ NIKE 같은 로고는 보통 크게 박혀있지만 제품명("Daybreak", "Air Force 1")은 작게 적혀있을 수 있음.
+       작은 글씨도 꼼꼼히 살펴서 제품명 찾으세요. 박스/택/라벨 어디든.
+  ⚠️ 진짜로 사진 어디에도 제품명 안 보일 때만 빈 값. 추측 금지.
+- modelCode: 제품 코드/SKU (예: DH7568-100, ID2773, FZ5057-100) — 영문+숫자 조합 패턴
+  · model 필드와 다름. modelCode에는 코드만, model에는 사람이 부르는 이름.
 - size: 사이즈 (한국 mm 또는 US/UK/EU 표기 그대로)
 - color: 색상명 (라벨에 표시된 그대로)
 - price: 가격 (숫자만, 통화 기호 제외)
 - currency: 가격 통화 — KRW/JPY/USD 중 하나
 - category: 추정 카테고리 — sneakers / apparel / cosmetics / electronics / accessories / other
 - rawText: 사진에서 읽은 모든 텍스트를 줄바꿈으로 구분 (검수용)
+
+[좋은 예 1 — 신발 풀 정보]
+사진에 "NIKE" 로고 + "AIR FORCE 1 '07" + "DH7568-100" 보이면:
+{ "brand": "Nike", "model": "Air Force 1 '07", "modelCode": "DH7568-100", ... }
+
+[좋은 예 2 — 제품명 작게]
+사진에 큰 "NIKE" 로고 + 작은 글씨로 "Daybreak" + "CK2351-101" 보이면:
+{ "brand": "Nike", "model": "Daybreak", "modelCode": "CK2351-101", ... }
+(작은 글씨도 놓치지 말 것 — 제품명이 시세 검색의 핵심)
+
+[좋은 예 3 — 한국어/일본어 라벨]
+"나이키 데이브레이크" 또는 "ナイキ デイブレイク" 보이면:
+{ "brand": "Nike", "model": "데이브레이크", ... }  (또는 "Daybreak" / "デイブレイク")
+
+[나쁜 예 — 절대 이렇게 하지 말 것]
+사진에 "NIKE" + "DH7568-100"만 명확히 보이고 제품명 진짜 없을 때:
+✗ { "brand": "Nike", "model": "Nike", "modelCode": "DH7568-100" }  ← 중복 잘못
+✗ { "brand": "Nike", "model": "DH7568-100", "modelCode": "DH7568-100" }  ← model에 SKU 잘못
+✓ { "brand": "Nike", "modelCode": "DH7568-100" }  ← model 비움 (그러면 후속 SKU 조회로 보강함)
 
 [지침]
 - 정보가 사진에 명확히 보일 때만 채워라. 추측하지 마라.
@@ -453,5 +483,304 @@ export async function extractFromTagImage(
     result.currency = obj.currency;
   }
 
+  // Post-processing: Gemini가 자주 저지르는 실수 정리
+  // 1) model이 brand와 동일 (예: brand="Nike", model="Nike") → model 제거
+  if (result.brand && result.model &&
+      result.brand.toLowerCase() === result.model.toLowerCase()) {
+    delete result.model;
+  }
+  // 2) model이 modelCode와 동일 (예: model="DH7568-100", modelCode="DH7568-100") → model 제거
+  if (result.model && result.modelCode &&
+      result.model.toLowerCase() === result.modelCode.toLowerCase()) {
+    delete result.model;
+  }
+  // 3) model이 SKU 패턴(영문+숫자+하이픈)이고 modelCode 비어있으면 → model을 modelCode로 이동
+  if (result.model && !result.modelCode && /^[A-Z0-9]+-?[A-Z0-9]+$/i.test(result.model.replace(/\s/g, ''))) {
+    result.modelCode = result.model;
+    delete result.model;
+  }
+
   return result;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// SKU/모델코드로 제품 상세명 조회 — Gemini google_search grounding 활용
+// 같은 제품군이라도 색상·에디션·연도별로 SKU가 다 달라서, 사용자가
+// 시세 검색할 땐 "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지" 같은
+// 풀네임이 필요. 이걸 Google에서 자동 조회.
+//
+// 예:
+//   Nike CK2351-101 → "나이키 데이브레이크 라이트 본"
+//   Nike BV7725-700 → "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지"
+//   Adidas FZ5057   → "아디다스 삼바 OG 화이트 블랙"
+// ────────────────────────────────────────────────────────────────────
+
+export interface ProductLookup {
+  fullName: string;       // 전체 한국어 상품명 (브랜드 포함, 색상·에디션 포함)
+  shortName?: string;     // 제품 라인명 (예: "Daybreak", "Air Force 1") — 보조용
+  colorway?: string;      // 색상/배색명 (예: "베가스 골드 컬리지 오렌지")
+  edition?: string;       // 에디션 (예: "SP", "OG", "Retro")
+}
+
+// Gemini grounding 자연어 텍스트 응답 1회 호출 (JSON 강제 X)
+// JSON 출력 강제하면 모델이 색상 같은 부가 정보를 압축하느라 누락하는 경향 있음.
+// 직접 채팅처럼 자연어로 답하게 두면 색상까지 잘 가져옴.
+async function callGroundingText(prompt: string, apiKey: string, modelName: GeminiModel): Promise<string> {
+  const model = MODEL_MAP[modelName];
+  const url = `${BASE_URL}/${model}:generateContent?key=${apiKey}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      tools: [{ google_search: {} }],
+      generationConfig: { temperature: 0.2 },
+    }),
+  });
+  if (!res.ok) return '';
+  const data = await res.json() as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
+  return (data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '').trim();
+}
+
+// 자연어 응답에서 풀네임 한 줄 추출
+// 응답 예: "BV7725-700은 나이키 데이브레이크 SP '베가스 골드(Vegas Gold)' 모델입니다."
+// 추출:    "나이키 데이브레이크 SP 베가스 골드"
+function extractFullNameFromText(text: string, brand: string): string {
+  if (!text) return '';
+  // 첫 줄 또는 첫 문장
+  let line = text.split(/[\n.]/)[0].trim();
+  // 흔한 패턴 제거: "XXX는 ", "XXX는: " 등
+  line = line.replace(/^[A-Z0-9-]+\s*(은|는|이|가|:)\s*/i, '');
+  // 마무리 어구 제거: "모델입니다", "입니다", "라는 신발", "라고 합니다"
+  line = line.replace(/(모델입니다|입니다|라는 신발(이에요|입니다)?|이에요|라고 합니다|입니다\.)\s*$/g, '').trim();
+  // 따옴표 안의 영어 보충 제거: "베가스 골드(Vegas Gold)" → "베가스 골드"
+  line = line.replace(/\s*\(([^)]*)\)/g, (_, content) => {
+    // 한글 포함이면 보존, 영어만이면 제거
+    return /[가-힣]/.test(content) ? ` ${content}` : '';
+  });
+  // 양 끝 따옴표 제거
+  line = line.replace(/^['"`'"]+|['"`'"]+$/g, '').trim();
+  // 따옴표 안의 한글은 살리기 ("'베가스 골드'" → "베가스 골드")
+  line = line.replace(/['"`'"]/g, ' ').replace(/\s+/g, ' ').trim();
+  // 결과가 brand로 시작 안 하면 brand 한국어 표기 추정해서 prepend?
+  // → 일단 그대로 반환 (사용자가 검수 가능)
+  return line;
+}
+
+export async function lookupProductName(
+  brand: string,
+  modelCode: string,
+  apiKey: string,
+): Promise<ProductLookup | null> {
+  if (!apiKey || apiKey.trim() === '') throw new Error('GEMINI_NO_KEY');
+  if (!brand || !modelCode) return null;
+
+  // ── 자연어 질문 ── (사용자가 직접 챗에서 묻듯이)
+  // JSON 강제 X → 색상 정보까지 풀로 가져옴
+  const naturalPrompt = `${brand} ${modelCode}는 무슨 제품이야?
+한국에서 부르는 정확한 풀네임을 한 줄로만 답해줘. 색상명까지 포함해서.
+브랜드, 시리즈, 에디션, 색상 다 포함된 형태로.
+다른 설명 없이 풀네임 한 줄만.
+
+예시 답:
+- "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지"
+- "나이키 에어 포스 1 '07 트리플 화이트"
+- "아디다스 삼바 OG 화이트 블랙"`;
+
+  // Flash 우선 — 응답 시간 절반 (Pro 5~10s vs Flash 2~4s)
+  // grounding 모드의 Flash도 SKU 풀네임 정확도 충분 (베타 테스트 결과)
+  // Flash 결과가 너무 짧거나 빈 값이면 Pro 폴백 (정확도 우선 케이스)
+  let text = await callGroundingText(naturalPrompt, apiKey, 'flash');
+  let fullName = extractFullNameFromText(text, brand);
+
+  if (!fullName || fullName.length < 5) {
+    text = await callGroundingText(naturalPrompt, apiKey, 'pro');
+    fullName = extractFullNameFromText(text, brand);
+  }
+
+  if (!fullName || fullName.length < 3) return null;
+  if (fullName.toLowerCase() === brand.toLowerCase()) return null;
+  if (fullName.toLowerCase() === modelCode.toLowerCase()) return null;
+
+  return { fullName };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 시세 조회 — Gemini의 Google Search grounding으로 마켓플레이스별 최근 판매가 추출
+// 백엔드 없이 실시간 시세 조회 가능 (사용자 본인 Gemini 키 활용)
+// ────────────────────────────────────────────────────────────────────
+
+export type Marketplace = '번개장터' | '당근마켓' | '쿠팡' | '11번가' | '네이버쇼핑' | '메루카리' | '기타';
+
+export interface PriceQuote {
+  marketplace: Marketplace | string;
+  price: number;
+  currency: 'KRW' | 'JPY' | 'USD';
+  title?: string;
+  url?: string;
+  recency?: string; // '최근 7일' / '최근 30일' / '판매중' 등
+}
+
+export interface GroundingSource {
+  title: string;       // 페이지 제목 (사용자가 식별 가능)
+  uri: string;         // grounding URI (Vertex 리다이렉트 — 곧 만료될 수 있음)
+}
+
+export interface PriceSearchResult {
+  query: string;
+  quotes: PriceQuote[];
+  sources: GroundingSource[]; // grounding sources (title + URI)
+}
+
+// Vertex grounding 리다이렉트는 토큰 수명이 짧고 자주 404 발생.
+// 사용자가 클릭해도 실제 페이지 못 봄 → 구글 검색으로 폴백.
+function isVertexRedirect(url: string): boolean {
+  return url.includes('vertexaisearch.cloud.google.com/grounding-api-redirect');
+}
+
+/**
+ * Gemini grounding으로 한국·일본 마켓플레이스 시세 조회.
+ * google_search 도구로 실시간 웹 검색 → 가격 추출 → JSON 반환.
+ *
+ * 주의: 결과는 LLM 추출이라 100% 정확하지 않을 수 있음.
+ * 비싼 상품일수록 사용자가 출처(sources)에서 직접 확인 권장.
+ *
+ * @param query   검색어 (예: 'Nike Air Force 1 LV8 DH7568-100')
+ * @param apiKey  Gemini API 키
+ */
+export async function searchPricesViaGemini(
+  query: string,
+  apiKey: string,
+): Promise<PriceSearchResult> {
+  if (!apiKey || apiKey.trim() === '') throw new Error('GEMINI_NO_KEY');
+
+  // grounding은 2.5 flash가 가장 가성비 좋음
+  const model = MODEL_MAP.flash;
+  const url = `${BASE_URL}/${model}:generateContent?key=${apiKey}`;
+
+  const prompt = `당신은 한국·일본 중고/신품 마켓플레이스의 시세 분석가입니다.
+Google 검색을 활용해 다음 상품의 최근 판매가를 마켓플레이스별로 조사하세요.
+
+[상품]
+${query}
+
+[조사 대상 마켓플레이스]
+- 번개장터 (한국 중고)
+- 당근마켓 (한국 중고)
+- 쿠팡 (한국 신품)
+- 11번가 (한국 신품)
+- 네이버쇼핑 (한국 가격비교)
+- 메루카리 (일본 중고)
+
+[지침]
+- Google 검색 결과에 실제로 노출된 가격만 사용. 추측·평균 계산·창작 금지.
+- 같은 마켓플레이스에서 여러 결과 있으면 가장 최근 또는 가장 대표적인 1~2건만.
+- 마켓플레이스를 못 찾았으면 그 항목은 생략 (빈 데이터로 채우지 말 것).
+- 가격 통화: 번장/당근/쿠팡/11번가/네이버 = KRW, 메루카리 = JPY.
+- 결과를 못 찾으면 quotes 빈 배열로.
+
+[출력 JSON 스키마]
+오직 JSON만 반환하세요. 다른 텍스트 없이.
+{
+  "quotes": [
+    {
+      "marketplace": "번개장터" | "당근마켓" | "쿠팡" | "11번가" | "네이버쇼핑" | "메루카리",
+      "price": 45000,
+      "currency": "KRW" | "JPY",
+      "title": "상품명 (옵션)",
+      "url": "출처 URL (옵션)",
+      "recency": "판매중" | "최근 7일" | "최근 30일" 등 (옵션)
+    }
+  ]
+}`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      tools: [{ google_search: {} }],
+      generationConfig: { temperature: 0.1 },
+    }),
+  });
+
+  if (!res.ok) {
+    let msg = res.statusText;
+    try {
+      const errBody = await res.json() as { error?: { message?: string } };
+      if (errBody?.error?.message) msg = errBody.error.message;
+    } catch {}
+    throw new Error(`GEMINI_HTTP_${res.status}: ${msg}`);
+  }
+
+  const data = await res.json() as {
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string }> };
+      groundingMetadata?: {
+        groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+      };
+    }>;
+  };
+
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  if (!text.trim()) throw new Error('GEMINI_PARSE_ERROR');
+
+  // 응답에서 JSON 부분만 추출 (grounding 모드는 ```json ... ``` 또는 부가 텍스트 섞일 수 있음)
+  let jsonStr = text.trim();
+  const jsonMatch = jsonStr.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
+  if (jsonMatch) jsonStr = jsonMatch[1];
+  // 첫 { ~ 마지막 } 만 시도
+  const firstBrace = jsonStr.indexOf('{');
+  const lastBrace = jsonStr.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    throw new Error('GEMINI_PARSE_ERROR');
+  }
+
+  const obj = parsed as { quotes?: unknown[] };
+  const rawQuotes = Array.isArray(obj.quotes) ? obj.quotes : [];
+
+  const quotes: PriceQuote[] = [];
+  for (const q of rawQuotes) {
+    if (!q || typeof q !== 'object') continue;
+    const item = q as Record<string, unknown>;
+    if (typeof item.marketplace !== 'string' || typeof item.price !== 'number' || item.price <= 0) continue;
+    if (item.currency !== 'KRW' && item.currency !== 'JPY' && item.currency !== 'USD') continue;
+    quotes.push({
+      marketplace: item.marketplace,
+      price: item.price,
+      currency: item.currency,
+      title: typeof item.title === 'string' ? item.title : undefined,
+      url: typeof item.url === 'string' ? item.url : undefined,
+      recency: typeof item.recency === 'string' ? item.recency : undefined,
+    });
+  }
+
+  // grounding sources 추출 — title + uri 모두 수집
+  // (Vertex 리다이렉트 URI는 자주 만료되므로 사용자에겐 title 위주로 표시)
+  const chunks = data?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+  const sources: GroundingSource[] = chunks
+    .map(c => ({
+      title: typeof c.web?.title === 'string' ? c.web.title : '',
+      uri: typeof c.web?.uri === 'string' ? c.web.uri : '',
+    }))
+    .filter(s => s.title || s.uri);
+
+  // quote.url에 Vertex 리다이렉트가 있으면 제거 (사용자에게 404만 보여주는 꼴)
+  // → undefined로 두면 PWA가 카드 클릭 비활성화
+  for (const q of quotes) {
+    if (q.url && isVertexRedirect(q.url)) {
+      q.url = undefined;
+    }
+  }
+
+  return { query, quotes, sources };
 }

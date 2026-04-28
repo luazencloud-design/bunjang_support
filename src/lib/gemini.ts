@@ -318,12 +318,15 @@ const TAG_PROMPT = `당신은 상품 택/라벨 사진을 분석해서 구조화
 
 [추출 대상]
 - brand: 브랜드명 (예: Nike, Adidas, Chanel) — 회사/제조사 이름
-- model: 제품 라인/시리즈명 (예: Air Force 1 Low, Stan Smith, Cortez)
+- model: 제품 라인/시리즈명 (예: Air Force 1, Daybreak, Stan Smith, Cortez, 데이브레이크, デイブレイク)
+  ⭐ 가장 중요한 필드 — 사진 어디든 적혀있으면 반드시 추출.
   ⚠️ 절대 brand와 같은 값을 model에 쓰지 마세요. brand="Nike"면 model은 "Nike"가 될 수 없음.
-  ⚠️ model은 \"브랜드 다음에 오는 제품 고유 명칭\"입니다. 예: \"Nike Air Force 1\"의 model은 \"Air Force 1\".
-  ⚠️ 사진에 제품명이 명확히 보이지 않으면 model은 빈 문자열로 두세요. 추측 금지.
+  ⚠️ 한국어/영어/일본어 모두 OK — 보이는 그대로 추출 ("데이브레이크" 또는 "Daybreak" 또는 "デイブレイク")
+  ⚠️ NIKE 같은 로고는 보통 크게 박혀있지만 제품명("Daybreak", "Air Force 1")은 작게 적혀있을 수 있음.
+       작은 글씨도 꼼꼼히 살펴서 제품명 찾으세요. 박스/택/라벨 어디든.
+  ⚠️ 진짜로 사진 어디에도 제품명 안 보일 때만 빈 값. 추측 금지.
 - modelCode: 제품 코드/SKU (예: DH7568-100, ID2773, FZ5057-100) — 영문+숫자 조합 패턴
-  · model 필드와 다름. modelCode에는 코드만 (예: "DH7568-100"), model에는 사람이 부르는 이름.
+  · model 필드와 다름. modelCode에는 코드만, model에는 사람이 부르는 이름.
 - size: 사이즈 (한국 mm 또는 US/UK/EU 표기 그대로)
 - color: 색상명 (라벨에 표시된 그대로)
 - price: 가격 (숫자만, 통화 기호 제외)
@@ -331,15 +334,24 @@ const TAG_PROMPT = `당신은 상품 택/라벨 사진을 분석해서 구조화
 - category: 추정 카테고리 — sneakers / apparel / cosmetics / electronics / accessories / other
 - rawText: 사진에서 읽은 모든 텍스트를 줄바꿈으로 구분 (검수용)
 
-[좋은 예 — 신발]
-사진에 "NIKE" 로고 + "AIR FORCE 1 '07" + "DH7568-100" 텍스트 보이면:
+[좋은 예 1 — 신발 풀 정보]
+사진에 "NIKE" 로고 + "AIR FORCE 1 '07" + "DH7568-100" 보이면:
 { "brand": "Nike", "model": "Air Force 1 '07", "modelCode": "DH7568-100", ... }
 
+[좋은 예 2 — 제품명 작게]
+사진에 큰 "NIKE" 로고 + 작은 글씨로 "Daybreak" + "CK2351-101" 보이면:
+{ "brand": "Nike", "model": "Daybreak", "modelCode": "CK2351-101", ... }
+(작은 글씨도 놓치지 말 것 — 제품명이 시세 검색의 핵심)
+
+[좋은 예 3 — 한국어/일본어 라벨]
+"나이키 데이브레이크" 또는 "ナイキ デイブレイク" 보이면:
+{ "brand": "Nike", "model": "데이브레이크", ... }  (또는 "Daybreak" / "デイブレイク")
+
 [나쁜 예 — 절대 이렇게 하지 말 것]
-사진에 "NIKE" 로고만 크게 + "DH7568-100" 코드만 보이면 (제품명 안 보임):
-✗ { "brand": "Nike", "model": "Nike", "modelCode": "DH7568-100" }  ← 잘못
-✗ { "brand": "Nike", "model": "DH7568-100", "modelCode": "DH7568-100" }  ← 잘못 (중복)
-✓ { "brand": "Nike", "modelCode": "DH7568-100" }  ← 정답 (model은 빈 값/생략)
+사진에 "NIKE" + "DH7568-100"만 명확히 보이고 제품명 진짜 없을 때:
+✗ { "brand": "Nike", "model": "Nike", "modelCode": "DH7568-100" }  ← 중복 잘못
+✗ { "brand": "Nike", "model": "DH7568-100", "modelCode": "DH7568-100" }  ← model에 SKU 잘못
+✓ { "brand": "Nike", "modelCode": "DH7568-100" }  ← model 비움 (그러면 후속 SKU 조회로 보강함)
 
 [지침]
 - 정보가 사진에 명확히 보일 때만 채워라. 추측하지 마라.
@@ -485,6 +497,78 @@ export async function extractFromTagImage(
   }
 
   return result;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// SKU/모델코드로 제품명 조회 — Gemini grounding 활용
+// OCR로 model 못 얻었지만 modelCode 있을 때 자동 보강
+// 예: brand="Nike" + modelCode="CK2351-101" → "Daybreak" 반환
+// ────────────────────────────────────────────────────────────────────
+
+export async function lookupProductName(
+  brand: string,
+  modelCode: string,
+  apiKey: string,
+): Promise<string | null> {
+  if (!apiKey || apiKey.trim() === '') throw new Error('GEMINI_NO_KEY');
+  if (!brand || !modelCode) return null;
+
+  const model = MODEL_MAP.flash;
+  const url = `${BASE_URL}/${model}:generateContent?key=${apiKey}`;
+
+  const prompt = `Google 검색을 활용해 다음 SKU의 공식 제품명만 한 단어/짧은 문구로 알려주세요.
+
+브랜드: ${brand}
+SKU/모델코드: ${modelCode}
+
+[지침]
+- 제품 라인/시리즈명만 반환 (예: "Daybreak", "Air Force 1", "Stan Smith")
+- 브랜드명("Nike", "Adidas")은 제외
+- SKU 코드는 제외
+- "Nike Air Force 1 LV8" 같은 풀네임에서 브랜드 빼고 → "Air Force 1 LV8"
+- 못 찾으면 빈 문자열 ""
+
+[출력 JSON]
+{ "productName": "..." }`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      tools: [{ google_search: {} }],
+      generationConfig: { temperature: 0.1 },
+    }),
+  });
+
+  if (!res.ok) return null;
+  const data = await res.json() as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  if (!text.trim()) return null;
+
+  // JSON 추출
+  let jsonStr = text.trim();
+  const jsonMatch = jsonStr.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
+  if (jsonMatch) jsonStr = jsonMatch[1];
+  const firstBrace = jsonStr.indexOf('{');
+  const lastBrace = jsonStr.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
+  }
+  try {
+    const parsed = JSON.parse(jsonStr) as { productName?: string };
+    const name = (parsed.productName || '').trim();
+    // brand가 추출 결과에 포함됐으면 제거
+    const cleaned = name.replace(new RegExp(`^${brand}\\s+`, 'i'), '').trim();
+    // 의미 있는 결과만 반환 (3자 이상, brand 자체가 아님)
+    if (cleaned.length < 2) return null;
+    if (cleaned.toLowerCase() === brand.toLowerCase()) return null;
+    return cleaned;
+  } catch {
+    return null;
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────

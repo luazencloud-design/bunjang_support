@@ -10,7 +10,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { fetchFxRatesIfStale, fetchFxRates } from '../lib/fx';
 import { SITES, SITE_PRESETS, openSearchTab } from '../lib/search';
-import { extractFromTagImage, searchPricesViaGemini } from '../lib/gemini';
+import { extractFromTagImage, searchPricesViaGemini, lookupProductName } from '../lib/gemini';
 
 // 카메라 캡처 헬퍼 — video 엘리먼트에서 한 프레임을 JPEG Blob으로
 function captureFrameToBlob(video) {
@@ -406,8 +406,11 @@ function MobilePWA({ tweaks }){
   useEffect(() => { saveJson(LS_KEY_FXMETA, fxMeta); }, [fxMeta]);
   useEffect(() => { saveJson(LS_KEY_HISTORY, history); }, [history]);
 
+  // 카메라 강제 재시작용 카운터 — restartCounter 증가 시 useEffect 재실행
+  const [restartCounter, setRestartCounter] = useState(0);
+
   // ─── 카메라 라이프사이클 ───
-  // 'scan' 탭 + facingMode 변경 시 카메라 (재)시작.
+  // 'scan' 탭 + facingMode/restartCounter 변경 시 카메라 (재)시작.
   // 다른 탭 가면 즉시 정지 (배터리/프라이버시).
   // 디코드 루프 없이 단순 라이브 프리뷰만 — [택 분석] 또는 [사진] 클릭 시 한 프레임 캡처.
   useEffect(() => {
@@ -420,6 +423,7 @@ function MobilePWA({ tweaks }){
       return;
     }
     let alive = true;
+    let blackScreenTimer = null;
     (async () => {
       if (!videoRef.current) return;
       // 기존 스트림 먼저 정리 (facingMode 전환 시 충돌 방지)
@@ -428,8 +432,6 @@ function MobilePWA({ tweaks }){
         cameraStreamRef.current = null;
       }
       setCameraState('permission');
-      // 1차: exact 제약 — 디바이스가 해당 카메라 보유 시 무조건 그쪽
-      // 2차: ideal 제약 폴백 — 단일 카메라 디바이스 등 대응
       const tryGetStream = async (mode) => {
         try {
           return await navigator.mediaDevices.getUserMedia({
@@ -452,7 +454,28 @@ function MobilePWA({ tweaks }){
         videoRef.current.srcObject = stream;
         await videoRef.current.play().catch(() => {});
         cameraStreamRef.current = stream;
-        setCameraState('ready');
+
+        // 검은화면 자동 감지 — 1.5초 후에도 video가 프레임 안 그리면 자동 재시작
+        // (iOS Safari에서 가끔 stream은 받았는데 video가 검정인 케이스)
+        blackScreenTimer = setTimeout(() => {
+          if (!alive) return;
+          const v = videoRef.current;
+          if (v && v.videoWidth === 0) {
+            console.warn('[camera] black screen detected, auto-restarting');
+            // 한번만 자동 재시도 (무한루프 방지)
+            setRestartCounter((c) => c + 1);
+          } else {
+            setCameraState('ready');
+          }
+        }, 1500);
+
+        // playing 이벤트 — 정상이면 즉시 ready로
+        const onPlaying = () => {
+          if (!alive) return;
+          if (blackScreenTimer) { clearTimeout(blackScreenTimer); blackScreenTimer = null; }
+          setCameraState('ready');
+        };
+        videoRef.current.addEventListener('playing', onPlaying, { once: true });
       } catch (e) {
         if (alive) {
           setCameraError(e?.message || String(e));
@@ -462,18 +485,23 @@ function MobilePWA({ tweaks }){
     })();
     return () => {
       alive = false;
+      if (blackScreenTimer) clearTimeout(blackScreenTimer);
       if (cameraStreamRef.current) {
         cameraStreamRef.current.getTracks().forEach((t) => t.stop());
         cameraStreamRef.current = null;
       }
     };
-  }, [tab, facingMode]);
+  }, [tab, facingMode, restartCounter]);
 
   // 카메라 전환 — facingMode state 토글 → useEffect가 알아서 재시작
   function handleSwitchCamera() {
     setFacingMode((m) => (m === 'environment' ? 'user' : 'environment'));
-    // toast로 즉시 피드백
     showToast(facingMode === 'environment' ? '전면 카메라' : '후면 카메라');
+  }
+  // 카메라 수동 재시작 — 검은화면일 때 사용
+  function handleRestartCamera() {
+    setRestartCounter((c) => c + 1);
+    showToast('카메라 재시작');
   }
 
   // ─── 마진 계산 ───
@@ -560,34 +588,53 @@ function MobilePWA({ tweaks }){
     try {
       const info = await extractFromTagImage(blob, settings.geminiApiKey);
       setTagInfo(info);
-      // 검색어를 자동으로 "브랜드 + 모델"로 채우기
-      // 검색어 자동 채움 우선순위:
-      //   1. brand + model       (제품명 — 시세 조사에 가장 좋음)
-      //   2. brand + modelCode   (제품명 못 얻은 경우 SKU로 보강 — "Nike"만 단독은 너무 광범위)
-      //   3. modelCode 단독       (브랜드도 못 얻은 극단 케이스)
-      const hasModel = info.model && info.brand && info.model.toLowerCase() !== info.brand.toLowerCase();
-      let composed = '';
-      if (info.brand && hasModel) {
-        composed = `${info.brand} ${info.model}`.trim();
-      } else if (info.brand && info.modelCode) {
-        // model 없을 때 brand 단독은 검색이 무의미 → SKU 코드로 보강
-        composed = `${info.brand} ${info.modelCode}`.trim();
-      } else if (info.brand) {
-        composed = info.brand.trim();
-      } else if (info.modelCode) {
-        composed = info.modelCode.trim();
-      }
-      if (composed) {
-        setSearchQuery(composed);
-        saveJson(LS_KEY_LAST_QUERY, composed);
-      }
+
       // 가격 정보 있으면 마진 계산용 cost로도 채워주기
       if (info.price && info.currency) {
         setCost(info.price);
         setCostCurrency(info.currency);
       }
-      showToast(`택 분석 완료 — ${composed || info.brand || '결과 확인'}`);
-      if (navigator.vibrate) navigator.vibrate(60);
+
+      // ── 검색어 자동 채움 — 제품명(model) 확보가 핵심 ──
+      const hasModel = info.model && info.brand && info.model.toLowerCase() !== info.brand.toLowerCase();
+
+      if (info.brand && hasModel) {
+        // 1순위: brand + model — 가장 좋음
+        const composed = `${info.brand} ${info.model}`.trim();
+        setSearchQuery(composed);
+        saveJson(LS_KEY_LAST_QUERY, composed);
+        showToast(`택 분석 완료 — ${composed}`);
+        if (navigator.vibrate) navigator.vibrate(60);
+      } else if (info.brand && info.modelCode) {
+        // 2순위: model 못 얻었지만 SKU 있음 → 우선 brand+SKU로 채워두고
+        // 백그라운드에서 SKU → 제품명 grounding 조회 (성공하면 더 좋은 검색어로 교체)
+        const fallback = `${info.brand} ${info.modelCode}`.trim();
+        setSearchQuery(fallback);
+        saveJson(LS_KEY_LAST_QUERY, fallback);
+        showToast(`택 분석 — 제품명 자동 조회 중...`);
+        if (navigator.vibrate) navigator.vibrate(60);
+        lookupProductName(info.brand, info.modelCode, settings.geminiApiKey)
+          .then((productName) => {
+            if (!productName) return;
+            const better = `${info.brand} ${productName}`.trim();
+            setSearchQuery(better);
+            saveJson(LS_KEY_LAST_QUERY, better);
+            // tagInfo에도 model 채워서 결과 카드에 표시
+            setTagInfo((prev) => prev ? { ...prev, model: productName } : prev);
+            showToast(`제품명 자동 보강 — ${productName}`);
+          })
+          .catch((err) => console.warn('[lookupProductName] 실패:', err));
+      } else if (info.brand) {
+        setSearchQuery(info.brand);
+        saveJson(LS_KEY_LAST_QUERY, info.brand);
+        showToast(`택 분석 완료 — ${info.brand} (제품명 직접 입력 권장)`);
+      } else if (info.modelCode) {
+        setSearchQuery(info.modelCode);
+        saveJson(LS_KEY_LAST_QUERY, info.modelCode);
+        showToast(`택 분석 완료 — ${info.modelCode}`);
+      } else {
+        showToast(`택 분석 완료 — 결과 확인`);
+      }
     } catch (e) {
       const msg = e?.message || String(e);
       if (msg === 'GEMINI_NO_KEY') showToast('Gemini API 키 누락');
@@ -850,7 +897,12 @@ function MobilePWA({ tweaks }){
                     {cameraState === 'ready' ? '카메라 준비' : cameraState === 'permission' ? '권한 요청 중' : '대기'}
                   </div>
                   <div style={{display:'flex', gap:6}}>
-                    <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환"><MIcon.flip/></button>
+                    <button className="m-scan-btn" onClick={handleRestartCamera} title="카메라 재시작 (검은화면일 때)">
+                      <MIcon.refresh s={18}/>
+                    </button>
+                    <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환">
+                      <MIcon.flip/>
+                    </button>
                   </div>
                 </div>
                 <div className="m-scan-bottom" style={{gap:14, alignItems:'center'}}>

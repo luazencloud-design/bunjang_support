@@ -361,6 +361,8 @@ function MobilePWA({ tweaks }){
   // 카메라 상태 (스캐너 X — OCR 메인이라 디코드 루프 불필요)
   const [cameraState, setCameraState] = useState('idle'); // 'idle' | 'permission' | 'ready' | 'error'
   const [cameraError, setCameraError] = useState(null);
+  // facingMode 직접 관리 — getSettings()는 브라우저별 신뢰성 낮음
+  const [facingMode, setFacingMode] = useState('environment'); // 'environment' | 'user'
 
   // 마진 입력
   const [cost, setCost] = useState(0);
@@ -420,8 +422,9 @@ function MobilePWA({ tweaks }){
   useEffect(() => { saveJson(LS_KEY_HISTORY, history); }, [history]);
 
   // ─── 카메라 라이프사이클 ───
-  // 'scan' 탭일 때만 카메라 활성, 다른 탭으로 가면 즉시 정지 (배터리/프라이버시)
-  // 디코드 루프 없이 단순 라이브 프리뷰만 — 사용자가 [택 분석] 또는 [사진] 클릭 시 한 프레임 캡처
+  // 'scan' 탭 + facingMode 변경 시 카메라 (재)시작.
+  // 다른 탭 가면 즉시 정지 (배터리/프라이버시).
+  // 디코드 루프 없이 단순 라이브 프리뷰만 — [택 분석] 또는 [사진] 클릭 시 한 프레임 캡처.
   useEffect(() => {
     if (tab !== 'scan') {
       if (cameraStreamRef.current) {
@@ -434,12 +437,29 @@ function MobilePWA({ tweaks }){
     let alive = true;
     (async () => {
       if (!videoRef.current) return;
+      // 기존 스트림 먼저 정리 (facingMode 전환 시 충돌 방지)
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+        cameraStreamRef.current = null;
+      }
       setCameraState('permission');
+      // 1차: exact 제약 — 디바이스가 해당 카메라 보유 시 무조건 그쪽
+      // 2차: ideal 제약 폴백 — 단일 카메라 디바이스 등 대응
+      const tryGetStream = async (mode) => {
+        try {
+          return await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { exact: mode } },
+            audio: false,
+          });
+        } catch {
+          return await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: mode } },
+            audio: false,
+          });
+        }
+      };
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } },
-          audio: false,
-        });
+        const stream = await tryGetStream(facingMode);
         if (!alive) {
           stream.getTracks().forEach((t) => t.stop());
           return;
@@ -462,27 +482,13 @@ function MobilePWA({ tweaks }){
         cameraStreamRef.current = null;
       }
     };
-  }, [tab]);
+  }, [tab, facingMode]);
 
-  // 카메라 전환 (전면 ↔ 후면)
-  async function handleSwitchCamera() {
-    if (!cameraStreamRef.current) return;
-    const cur = cameraStreamRef.current.getVideoTracks()[0]?.getSettings()?.facingMode;
-    const next = cur === 'user' ? 'environment' : 'user';
-    cameraStreamRef.current.getTracks().forEach((t) => t.stop());
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: next } },
-        audio: false,
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
-      }
-      cameraStreamRef.current = stream;
-    } catch (e) {
-      showToast('카메라 전환 실패: ' + (e?.message || String(e)));
-    }
+  // 카메라 전환 — facingMode state 토글 → useEffect가 알아서 재시작
+  function handleSwitchCamera() {
+    setFacingMode((m) => (m === 'environment' ? 'user' : 'environment'));
+    // toast로 즉시 피드백
+    showToast(facingMode === 'environment' ? '전면 카메라' : '후면 카메라');
   }
 
   // ─── 마진 계산 ───

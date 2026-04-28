@@ -14,16 +14,30 @@ import { extractFromTagImage, searchPricesViaGemini, lookupProductName } from '.
 import { parseSize, formatSize } from '../lib/size';
 
 // 카메라 캡처 헬퍼 — video 엘리먼트에서 한 프레임을 JPEG Blob으로
-function captureFrameToBlob(video) {
+//
+// @param video      비디오 엘리먼트
+// @param maxWidth   최대 가로 (px). 0/null = 원본 해상도 유지
+// @param quality    JPEG 품질 0~1 (기본 0.85)
+//
+// 등록용 사진은 maxWidth 없이 (고화질),
+// OCR 분석용은 maxWidth=1280 (업로드/처리 속도 ↑, 글자 인식 정확도는 변동 거의 없음)
+function captureFrameToBlob(video, maxWidth = 0, quality = 0.85) {
   return new Promise((resolve) => {
     if (!video?.videoWidth || !video?.videoHeight) return resolve(null);
+    let w = video.videoWidth;
+    let h = video.videoHeight;
+    if (maxWidth > 0 && w > maxWidth) {
+      const scale = maxWidth / w;
+      w = maxWidth;
+      h = Math.round(video.videoHeight * scale);
+    }
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext('2d');
     if (!ctx) return resolve(null);
-    ctx.drawImage(video, 0, 0);
-    canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.92);
+    ctx.drawImage(video, 0, 0, w, h);
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', quality);
   });
 }
 
@@ -642,7 +656,9 @@ function MobilePWA({ tweaks }){
       showToast('설정에서 Gemini API 키를 입력하세요');
       return;
     }
-    const blob = await captureFrameToBlob(videoRef.current);
+    // OCR용 캡처는 1280px로 축소 — 4K 풀해상도 대비 업로드 70% ↓, Gemini 처리도 빨라짐
+    // 텍스트 인식 정확도는 1280px이면 충분 (택의 글자가 화면 1/3 이상이면 인식됨)
+    const blob = await captureFrameToBlob(videoRef.current, 1280, 0.85);
     if (!blob) {
       showToast('사진 캡처 실패');
       return;

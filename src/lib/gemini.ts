@@ -589,13 +589,14 @@ export async function lookupProductName(
 - "나이키 에어 포스 1 '07 트리플 화이트"
 - "아디다스 삼바 OG 화이트 블랙"`;
 
-  // Pro로 첫 시도 (색상 추출 정확도 ↑)
-  let text = await callGroundingText(naturalPrompt, apiKey, 'pro');
+  // Flash 우선 — 응답 시간 절반 (Pro 5~10s vs Flash 2~4s)
+  // grounding 모드의 Flash도 SKU 풀네임 정확도 충분 (베타 테스트 결과)
+  // Flash 결과가 너무 짧거나 빈 값이면 Pro 폴백 (정확도 우선 케이스)
+  let text = await callGroundingText(naturalPrompt, apiKey, 'flash');
   let fullName = extractFullNameFromText(text, brand);
 
-  // Pro 실패 또는 너무 짧으면 (브랜드 추정 실패 등) Flash 폴백
   if (!fullName || fullName.length < 5) {
-    text = await callGroundingText(naturalPrompt, apiKey, 'flash');
+    text = await callGroundingText(naturalPrompt, apiKey, 'pro');
     fullName = extractFullNameFromText(text, brand);
   }
 

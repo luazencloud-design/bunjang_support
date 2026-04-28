@@ -142,6 +142,22 @@ export interface InjectImageData {
   data: string;   // base64 dataURL (예: 'data:image/jpeg;base64,...')
 }
 
+// 모바일 PWA에서 URL 딥링크로 보낸 prefill 데이터
+// content script가 ?bjh_prefill=<base64-json> 감지 시 background로 전달, sidepanel이 폼 자동 채움
+export interface PrefillPayload {
+  v: 1;                        // 스키마 버전
+  title?: string;
+  brand?: string;
+  model?: string;
+  modelCode?: string;
+  feature?: string;            // AI 입력란용 자유 텍스트 (사이즈/색상 등)
+  cost?: number;
+  costCurrency?: Currency;
+  price?: number;
+  priceCurrency?: Currency;
+  photoCount?: number;         // 모바일에 남아있는 사진 개수 (안내 표시용)
+}
+
 export type ExtMessage =
   | { type: 'inject';            product: Product; imageData?: InjectImageData[] }
   | { type: 'inject:result';     results: InjectResult[] }
@@ -149,4 +165,5 @@ export type ExtMessage =
   | { type: 'category:tree' }
   | { type: 'category:tree:result';    ok: boolean; tree?: CategoryTreeNode[]; error?: string }
   | { type: 'category:options';        path: string[] }
-  | { type: 'category:options:result'; ok: boolean; groups?: CategoryOptionGroup[]; error?: string };
+  | { type: 'category:options:result'; ok: boolean; groups?: CategoryOptionGroup[]; error?: string }
+  | { type: 'prefill';           data: PrefillPayload };

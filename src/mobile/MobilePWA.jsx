@@ -8,11 +8,23 @@
 //   - 저장:    localStorage (history, settings) — 확장 IndexedDB와는 분리
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { BarcodeScanner } from '../lib/scanner';
 import { fetchFxRatesIfStale, fetchFxRates } from '../lib/fx';
-import { isValidJan } from '../lib/mercari';
 import { SITES, SITE_PRESETS, openSearchTab } from '../lib/search';
 import { extractFromTagImage } from '../lib/gemini';
+
+// 카메라 캡처 헬퍼 — video 엘리먼트에서 한 프레임을 JPEG Blob으로
+function captureFrameToBlob(video) {
+  return new Promise((resolve) => {
+    if (!video?.videoWidth || !video?.videoHeight) return resolve(null);
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return resolve(null);
+    ctx.drawImage(video, 0, 0);
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.92);
+  });
+}
 
 // ─── localStorage key ──────────────────────────────────────────────
 const LS_KEY_HISTORY    = 'bunjang-mobile:history';
@@ -346,10 +358,11 @@ function MobilePWA({ tweaks }){
   const [fxMeta, setFxMeta] = useState(() => loadJson(LS_KEY_FXMETA, null));
   const [fxLoading, setFxLoading] = useState(false);
 
-  // 스캔 결과
-  const [scanned, setScanned] = useState(null); // { code, format, ts } | null
-  const [scanState, setScanState] = useState('idle'); // 'idle' | 'permission' | 'scanning' | 'error'
-  const [scanError, setScanError] = useState(null);
+  // 카메라 상태 (스캐너 X — OCR 메인이라 디코드 루프 불필요)
+  const [cameraState, setCameraState] = useState('idle'); // 'idle' | 'permission' | 'ready' | 'error'
+  const [cameraError, setCameraError] = useState(null);
+  // facingMode 직접 관리 — getSettings()는 브라우저별 신뢰성 낮음
+  const [facingMode, setFacingMode] = useState('environment'); // 'environment' | 'user'
 
   // 마진 입력
   const [cost, setCost] = useState(0);
@@ -379,7 +392,8 @@ function MobilePWA({ tweaks }){
 
   // 카메라/스캐너 ref
   const videoRef = useRef(null);
-  const scannerRef = useRef(null);
+  const cameraStreamRef = useRef(null);
+  const fileInputRef = useRef(null);  // 갤러리/폰 카메라 파일 선택용 hidden input
 
   // ─── 환율 자동 갱신 (mount 시 + 6h 캐시) ───
   useEffect(() => {
@@ -407,49 +421,75 @@ function MobilePWA({ tweaks }){
   useEffect(() => { saveJson(LS_KEY_FXMETA, fxMeta); }, [fxMeta]);
   useEffect(() => { saveJson(LS_KEY_HISTORY, history); }, [history]);
 
-  // ─── 카메라/스캐너 라이프사이클 ───
-  // 'scan' 탭일 때만 스캐너 실행, 다른 탭으로 가면 즉시 정지 (배터리/프라이버시)
+  // ─── 카메라 라이프사이클 ───
+  // 'scan' 탭 + facingMode 변경 시 카메라 (재)시작.
+  // 다른 탭 가면 즉시 정지 (배터리/프라이버시).
+  // 디코드 루프 없이 단순 라이브 프리뷰만 — [택 분석] 또는 [사진] 클릭 시 한 프레임 캡처.
   useEffect(() => {
     if (tab !== 'scan') {
-      if (scannerRef.current) {
-        scannerRef.current.stop();
-        scannerRef.current = null;
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+        cameraStreamRef.current = null;
       }
-      setScanState('idle');
+      setCameraState('idle');
       return;
     }
     let alive = true;
     (async () => {
       if (!videoRef.current) return;
-      setScanState('permission');
+      // 기존 스트림 먼저 정리 (facingMode 전환 시 충돌 방지)
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+        cameraStreamRef.current = null;
+      }
+      setCameraState('permission');
+      // 1차: exact 제약 — 디바이스가 해당 카메라 보유 시 무조건 그쪽
+      // 2차: ideal 제약 폴백 — 단일 카메라 디바이스 등 대응
+      const tryGetStream = async (mode) => {
+        try {
+          return await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { exact: mode } },
+            audio: false,
+          });
+        } catch {
+          return await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: mode } },
+            audio: false,
+          });
+        }
+      };
       try {
-        const scanner = new BarcodeScanner(videoRef.current);
-        await scanner.start((result) => {
-          if (!alive) return;
-          setScanned({ code: result.text, format: result.format, ts: result.timestamp });
-          // 검색어 input도 바코드로 초기화 (사용자가 편집하기 전 시작값)
-          setSearchQuery(result.text);
-          showToast(`바코드 인식: ${result.text}`);
-          // navigator.vibrate (지원 브라우저만)
-          if (navigator.vibrate) navigator.vibrate(60);
-        });
-        scannerRef.current = scanner;
-        if (alive) setScanState('scanning');
+        const stream = await tryGetStream(facingMode);
+        if (!alive) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play().catch(() => {});
+        cameraStreamRef.current = stream;
+        setCameraState('ready');
       } catch (e) {
         if (alive) {
-          setScanError(e?.message || String(e));
-          setScanState('error');
+          setCameraError(e?.message || String(e));
+          setCameraState('error');
         }
       }
     })();
     return () => {
       alive = false;
-      if (scannerRef.current) {
-        scannerRef.current.stop();
-        scannerRef.current = null;
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+        cameraStreamRef.current = null;
       }
     };
-  }, [tab]);
+  }, [tab, facingMode]);
+
+  // 카메라 전환 — facingMode state 토글 → useEffect가 알아서 재시작
+  function handleSwitchCamera() {
+    setFacingMode((m) => (m === 'environment' ? 'user' : 'environment'));
+    // toast로 즉시 피드백
+    showToast(facingMode === 'environment' ? '전면 카메라' : '후면 카메라');
+  }
 
   // ─── 마진 계산 ───
   const margin = useMemo(() => {
@@ -476,33 +516,55 @@ function MobilePWA({ tweaks }){
     }
   }
 
+  // 파일 입력 (갤러리 + 폰 기본 카메라 호출) — PWA 라이브 캡처보다 화질·UX 좋음
+  // <input type=file accept=image/* multiple>: 모바일에서 "사진/동영상 라이브러리" + "사진 찍기" 옵션 제공
+  async function handleFileUpload(e) {
+    const files = [...(e.target.files || [])];
+    if (files.length === 0) return;
+    const remaining = Math.max(0, 6 - photos.length);
+    if (remaining === 0) {
+      showToast('이미 6장 — 일부 삭제 후 추가하세요');
+      return;
+    }
+    const accepted = files.slice(0, remaining);
+    setPhotos(prev => [...prev, ...accepted]);
+    showToast(
+      accepted.length < files.length
+        ? `${accepted.length}장 추가 (한도 6장 초과 ${files.length - accepted.length}장 제외)`
+        : `${accepted.length}장 추가됨 · ${photos.length + accepted.length}/6`
+    );
+    if (navigator.vibrate) navigator.vibrate(40);
+    // 같은 파일 다시 선택할 수 있게 input 초기화
+    e.target.value = '';
+  }
+
   async function handleCapturePhoto() {
-    if (!scannerRef.current) {
+    if (cameraState !== 'ready') {
       showToast('카메라가 활성화되지 않았습니다');
       return;
     }
-    const blob = await scannerRef.current.capturePhoto();
+    const blob = await captureFrameToBlob(videoRef.current);
     if (!blob) {
       showToast('캡처 실패');
       return;
     }
     setPhotos(prev => [...prev, blob].slice(-6));
     showToast(`사진 저장됨 · ${Math.min(photos.length + 1, 6)}/6`);
+    if (navigator.vibrate) navigator.vibrate(40);
   }
 
   // ── 택 분석 — Gemini Vision으로 사진에서 브랜드/모델/사이즈/가격 추출 ──
   async function handleAnalyzeTag() {
     if (ocrLoading) return;
-    if (!scannerRef.current) {
+    if (cameraState !== 'ready') {
       showToast('카메라가 활성화되지 않았습니다');
       return;
     }
     if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
       showToast('설정에서 Gemini API 키를 입력하세요');
-      // 설정으로 즉시 이동하지 않고 사용자가 직접 가도록
       return;
     }
-    const blob = await scannerRef.current.capturePhoto();
+    const blob = await captureFrameToBlob(videoRef.current);
     if (!blob) {
       showToast('사진 캡처 실패');
       return;
@@ -524,12 +586,6 @@ function MobilePWA({ tweaks }){
         setCost(info.price);
         setCostCurrency(info.currency);
       }
-      // scanned 카드도 노출 — 멀티 검색 버튼 보이게 (바코드 대신 OCR 결과 식별자로)
-      setScanned({
-        code: info.modelCode || info.model || info.brand || '(택 OCR)',
-        format: 'OCR',
-        ts: Date.now(),
-      });
       showToast(`택 분석 완료 — ${composed || info.brand || '결과 확인'}`);
       if (navigator.vibrate) navigator.vibrate(60);
     } catch (e) {
@@ -543,30 +599,96 @@ function MobilePWA({ tweaks }){
     }
   }
 
-  function handleSwitchCamera() {
-    if (scannerRef.current) {
-      scannerRef.current.switchCamera().then(() => {
-        // switchCamera 자체가 스캐너를 stop하므로 useEffect가 재시작
-        setScanState('idle');
-        // 강제 재시작 트리거
-        setTab(t => t);
-      });
-    }
-  }
-
   function handleSiteSearch(siteCode) {
-    const q = (searchQuery || scanned?.code || '').trim();
+    const q = (searchQuery || '').trim();
     if (!q) {
       showToast('검색어가 비어있습니다');
       return;
     }
-    // 마지막 검색어 캐싱 (바코드와 다른 경우만 — 사용자가 직접 편집한 경우)
-    if (q !== scanned?.code) saveJson(LS_KEY_LAST_QUERY, q);
+    saveJson(LS_KEY_LAST_QUERY, q);
     openSearchTab(siteCode, q);
   }
 
   function jumpToMargin() {
     setTab('margin');
+  }
+
+  // ── 확장으로 보내기 — URL 딥링크 + Web Share API ──
+  // 번개장터 등록 페이지로 가는 URL에 prefill 데이터를 인코딩.
+  // PC에서 그 URL을 열면 content script가 sidepanel로 전달 → 폼 자동 채움.
+  // 사진은 URL 한계로 못 보냄 — 백엔드 큐(Phase 8)로 별도 처리 예정.
+  async function handleSendToExtension() {
+    if (!tagInfo && !searchQuery && !cost && !price) {
+      showToast('보낼 정보가 없습니다');
+      return;
+    }
+    // 페이로드 — 확장 사이드패널의 Product 형태로 매핑
+    const payload = {
+      v: 1, // 스키마 버전
+      title: tagInfo
+        ? [tagInfo.brand, tagInfo.model].filter(Boolean).join(' ').trim()
+        : (searchQuery || ''),
+      brand: tagInfo?.brand,
+      model: tagInfo?.model,
+      modelCode: tagInfo?.modelCode,
+      // 사이드패널 AI 입력란용 feature 필드에 합치기 (사이즈/색상 등 분류 안 된 텍스트)
+      feature: [tagInfo?.size && `사이즈 ${tagInfo.size}`, tagInfo?.color]
+        .filter(Boolean).join(', '),
+      cost: cost || tagInfo?.price || 0,
+      costCurrency: costCurrency || tagInfo?.currency || 'KRW',
+      price: price || 0,
+      priceCurrency: 'KRW',
+      // 사진은 URL 한계로 못 담음 — Phase 8 백엔드 큐로 별도 처리
+      photoCount: photos.length,
+    };
+    const json = JSON.stringify(payload);
+    const b64 = btoa(unescape(encodeURIComponent(json)));
+    const url = `https://m.bunjang.co.kr/products/new?bjh_prefill=${b64}`;
+
+    // 사진을 함께 공유 시도 — Web Share API의 files 지원 (iOS 15+, Android Chrome)
+    // 지원되면 카톡/AirDrop으로 URL + 사진 한 번에 → PC가 둘 다 받음
+    const photoFiles = photos.map((blob, i) => {
+      const ext = (blob.type || 'image/jpeg').split('/')[1] || 'jpg';
+      return new File([blob], `photo-${Date.now()}-${i + 1}.${ext}`, { type: blob.type || 'image/jpeg' });
+    });
+
+    if (navigator.share) {
+      const baseShare = {
+        title: '번장 등록 정보',
+        text: photos.length > 0
+          ? `PC에서 이 링크를 열면 폼이 자동 입력됩니다 (사진 ${photos.length}장 동봉)`
+          : 'PC에서 이 링크를 열면 폼이 자동 입력됩니다',
+        url,
+      };
+      // files 지원 여부 먼저 확인 — 미지원 환경에서 share 호출하면 throw
+      const withFiles = photoFiles.length > 0
+        && navigator.canShare
+        && navigator.canShare({ files: photoFiles });
+      try {
+        await navigator.share(withFiles ? { ...baseShare, files: photoFiles } : baseShare);
+        showToast(withFiles ? `공유 완료 (사진 ${photoFiles.length}장 포함)` : '공유 완료');
+      } catch (e) {
+        if (e?.name !== 'AbortError') {
+          // 진짜 에러 — files 거부 등 → 텍스트만 재시도, 그것도 실패면 클립보드
+          try {
+            await navigator.share(baseShare);
+            showToast('공유 완료 (사진은 따로 전송 필요)');
+          } catch (e2) {
+            if (e2?.name !== 'AbortError') await copyToClipboard(url);
+          }
+        }
+      }
+    } else {
+      await copyToClipboard(url);
+    }
+  }
+  async function copyToClipboard(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('URL 복사됨 — PC에 붙여넣어 열기');
+    } catch {
+      showToast('복사 실패 — URL: ' + text.slice(0, 50) + '...');
+    }
   }
 
   function handleSaveHistory() {
@@ -645,139 +767,122 @@ function MobilePWA({ tweaks }){
             <div className="m-scan">
               <video ref={videoRef} className="m-scan-video" autoPlay muted playsInline />
 
-              {scanState === 'error' && (
+              {cameraState === 'error' && (
                 <div className="m-scan-perm">
                   <div>카메라 권한이 거부됐거나 사용할 수 없습니다.</div>
-                  <div style={{fontSize:11.5, opacity:.7}}>{scanError}</div>
+                  <div style={{fontSize:11.5, opacity:.7}}>{cameraError}</div>
                   <button onClick={() => { setTab('margin'); setTimeout(()=>setTab('scan'), 50); }}>다시 시도</button>
                 </div>
               )}
-              {scanState === 'permission' && (
+              {cameraState === 'permission' && (
                 <div className="m-scan-perm">카메라 권한 요청 중...</div>
               )}
 
-              {scanState === 'scanning' && (
+              {/* 모서리 마커만 (스캔 라인 없음 — 더 이상 바코드 디코드 X) */}
+              {cameraState === 'ready' && (
                 <div className="m-scan-frame">
                   <div className="m-scan-window"><i/><b/></div>
-                  {!scanned && <div className="m-scan-line"/>}
                 </div>
               )}
 
               <div className="m-scan-overlay">
                 <div className="m-scan-top">
                   <div className="m-scan-pill">
-                    <span className="live"/>{scanned ? '검출됨' : (scanState === 'scanning' ? '탐색 중' : '대기')}
+                    <span className="live"/>
+                    {cameraState === 'ready' ? '카메라 준비' : cameraState === 'permission' ? '권한 요청 중' : '대기'}
                   </div>
                   <div style={{display:'flex', gap:6}}>
                     <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환"><MIcon.flip/></button>
                   </div>
                 </div>
-                <div className="m-scan-bottom" style={{gap:18, alignItems:'center'}}>
-                  {/* 택 분석 — Gemini Vision OCR (왼쪽) */}
+                <div className="m-scan-bottom" style={{gap:14, alignItems:'center'}}>
+                  {/* 사진 추가 (왼쪽 보조) — 등록용 사진 캡처만, OCR 안 함 */}
                   <button
                     className="m-scan-btn"
-                    onClick={handleAnalyzeTag}
-                    disabled={ocrLoading}
-                    title="택 사진 분석으로 상품 정보 자동 채우기"
-                    style={{
-                      width:60, height:60,
-                      background: ocrLoading ? 'rgba(255,255,255,.3)' : 'var(--accent)',
-                      border:'1px solid rgba(255,255,255,.3)',
-                      fontSize:20, fontWeight:700,
-                      opacity: ocrLoading ? 0.6 : 1,
-                    }}>
-                    {ocrLoading ? '⏳' : '📷'}
+                    onClick={handleCapturePhoto}
+                    title="사진 추가 (등록용)"
+                    style={{width:54, height:54}}>
+                    <MIcon.camera s={20}/>
                   </button>
 
-                  {/* 사진 캡처 (가운데, 메인) */}
-                  <button className="m-scan-capture" onClick={handleCapturePhoto} title="사진 캡처"/>
+                  {/* 택 분석 (가운데, 메인) — OCR로 상품 정보 자동 채움 */}
+                  <button
+                    onClick={handleAnalyzeTag}
+                    disabled={ocrLoading}
+                    title="택 사진 분석 → 브랜드/모델/사이즈/가격 자동 추출"
+                    style={{
+                      width:74, height:74, borderRadius:'50%',
+                      background: ocrLoading ? 'rgba(255,255,255,.4)' : 'var(--accent)',
+                      border:'4px solid rgba(255,255,255,.35)',
+                      color:'white', fontFamily:'inherit',
+                      display:'flex', alignItems:'center', justifyContent:'center',
+                      fontSize: ocrLoading ? 24 : 12, fontWeight:700,
+                      letterSpacing:'-.02em', lineHeight:1,
+                      boxShadow: '0 4px 16px oklch(68% 0.15 45 / 0.4)',
+                      opacity: ocrLoading ? 0.7 : 1,
+                    }}>
+                    {ocrLoading ? '⏳' : <span>택<br/>분석</span>}
+                  </button>
 
-                  {/* 자리맞춤용 빈 공간 (왼쪽 OCR 버튼과 대칭) */}
-                  <div style={{width:60}}/>
+                  {/* 자리맞춤용 빈 공간 */}
+                  <div style={{width:54}}/>
                 </div>
               </div>
             </div>
 
-            {/* 택 OCR 결과 카드 — scanned 카드보다 위에 표시 */}
-            {tagInfo && (
-              <div className="m-card" style={{borderColor:'var(--accent)', borderWidth:1.5}}>
-                <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:10}}>
-                  <span className="m-chip accent" style={{fontSize:11}}>📷 택 분석 결과</span>
-                  <button
-                    onClick={() => setTagInfo(null)}
-                    style={{marginLeft:'auto', border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer', padding:'2px 6px'}}>
-                    지우기
-                  </button>
-                </div>
-                {(tagInfo.brand || tagInfo.model) && (
-                  <div style={{fontSize:15, fontWeight:600, marginBottom:6, letterSpacing:'-.02em'}}>
-                    {[tagInfo.brand, tagInfo.model].filter(Boolean).join(' ')}
-                  </div>
-                )}
-                <div style={{display:'flex', flexWrap:'wrap', gap:5, marginBottom:tagInfo.rawText?10:0}}>
-                  {tagInfo.modelCode && <span className="m-chip">코드 {tagInfo.modelCode}</span>}
-                  {tagInfo.size && <span className="m-chip">사이즈 {tagInfo.size}</span>}
-                  {tagInfo.color && <span className="m-chip">{tagInfo.color}</span>}
-                  {tagInfo.price && tagInfo.currency && (
-                    <span className="m-chip success">
-                      {tagInfo.currency === 'KRW' ? '₩' : tagInfo.currency === 'JPY' ? '¥' : '$'}
-                      {tagInfo.price.toLocaleString()}
-                    </span>
-                  )}
-                  {tagInfo.category && <span className="m-chip">{tagInfo.category}</span>}
-                </div>
-                {tagInfo.rawText && (
-                  <details>
-                    <summary style={{fontSize:10.5, color:'var(--ink-3)', cursor:'pointer'}}>원문 OCR 텍스트</summary>
-                    <pre style={{fontSize:10.5, color:'var(--ink-2)', whiteSpace:'pre-wrap', marginTop:6, fontFamily:'JetBrains Mono, monospace', maxHeight:120, overflow:'auto', padding:8, background:'var(--chip)', borderRadius:6}}>
-                      {tagInfo.rawText}
-                    </pre>
-                  </details>
-                )}
-              </div>
-            )}
-
-            {scanned && (
-              <div className="m-card">
-                <div className="m-card-head">
-                  <div className="m-thumb">{scanned.format.slice(0,4)}</div>
-                  <div style={{flex:1, minWidth:0}}>
-                    <div className="m-card-title">{scanned.code}</div>
-                    <div className="m-card-meta">{scanned.format} · {new Date(scanned.ts).toLocaleTimeString('ko-KR')}</div>
-                    <div style={{marginTop:6, display:'flex', gap:4, flexWrap:'wrap'}}>
-                      {isValidJan(scanned.code) && <span className="m-chip success"><MIcon.check s={10}/> JAN/EAN</span>}
-                      <span className="m-chip">{scanned.format}</span>
+            {/* 택 분석 결과 + 검색 + 확장 전송 (하나의 카드에 통합) */}
+            {(tagInfo || searchQuery) && (
+              <div className="m-card" style={tagInfo ? {borderColor:'var(--accent)', borderWidth:1.5} : undefined}>
+                {/* 택 분석 결과 */}
+                {tagInfo && (
+                  <>
+                    <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:8}}>
+                      <span className="m-chip accent" style={{fontSize:11}}>📷 택 분석 결과</span>
+                      <button
+                        onClick={() => { setTagInfo(null); setSearchQuery(''); }}
+                        style={{marginLeft:'auto', border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer', padding:'2px 6px'}}>
+                        지우기
+                      </button>
                     </div>
-                  </div>
-                </div>
+                    {(tagInfo.brand || tagInfo.model) && (
+                      <div style={{fontSize:16, fontWeight:600, marginBottom:8, letterSpacing:'-.02em'}}>
+                        {[tagInfo.brand, tagInfo.model].filter(Boolean).join(' ')}
+                      </div>
+                    )}
+                    <div style={{display:'flex', flexWrap:'wrap', gap:5, marginBottom:12}}>
+                      {tagInfo.modelCode && <span className="m-chip">코드 {tagInfo.modelCode}</span>}
+                      {tagInfo.size && <span className="m-chip">사이즈 {tagInfo.size}</span>}
+                      {tagInfo.color && <span className="m-chip">{tagInfo.color}</span>}
+                      {tagInfo.price && tagInfo.currency && (
+                        <span className="m-chip success">
+                          {tagInfo.currency === 'KRW' ? '₩' : tagInfo.currency === 'JPY' ? '¥' : '$'}
+                          {tagInfo.price.toLocaleString()}
+                        </span>
+                      )}
+                      {tagInfo.category && <span className="m-chip">{tagInfo.category}</span>}
+                    </div>
+                  </>
+                )}
 
-                {/* 검색어 input — 바코드는 메루카리에서 거의 안 잡히므로 사용자가 상품명으로 편집 */}
+                {/* 검색어 input (편집 가능) */}
                 <div style={{marginBottom:10}}>
                   <label style={{fontSize:11, fontWeight:500, color:'var(--ink-2)', display:'block', marginBottom:4}}>
-                    검색어 <span style={{color:'var(--ink-3)', fontWeight:400}}>(편집 가능 — 일본어/한글로 바꾸면 정확도 ↑)</span>
+                    검색어 <span style={{color:'var(--ink-3)', fontWeight:400}}>(직접 편집 가능)</span>
                   </label>
                   <div className="m-num" style={{padding:'2px 12px'}}>
                     <input
                       type="text"
                       value={searchQuery}
                       onChange={e => setSearchQuery(e.target.value)}
-                      placeholder={scanned.code}
+                      placeholder="브랜드 + 모델명"
                       style={{
                         flex:1, border:'none', outline:'none', background:'transparent',
                         padding:'10px 0', fontSize:14, color:'var(--ink)',
                         minWidth:0,
                       }}
                     />
-                    {searchQuery && searchQuery !== scanned.code && (
-                      <button
-                        onClick={() => setSearchQuery(scanned.code)}
-                        title="바코드로 되돌리기"
-                        style={{border:'none', background:'transparent', color:'var(--ink-3)', cursor:'pointer', fontSize:11, padding:'4px 6px'}}>
-                        ↺
-                      </button>
-                    )}
                   </div>
-                  {lastSavedQuery && lastSavedQuery !== scanned.code && searchQuery === scanned.code && (
+                  {lastSavedQuery && !searchQuery && (
                     <button
                       onClick={() => setSearchQuery(lastSavedQuery)}
                       style={{
@@ -789,7 +894,7 @@ function MobilePWA({ tweaks }){
                   )}
                 </div>
 
-                {/* 멀티 사이트 검색 버튼 — 한국 매입 워크플로 우선 */}
+                {/* 멀티 사이트 검색 버튼 */}
                 <div style={{display:'grid', gridTemplateColumns:'repeat(2, 1fr)', gap:6, marginBottom:10}}>
                   {SITE_PRESETS['sourcing-kr'].map(siteCode => {
                     const meta = SITES[siteCode];
@@ -807,7 +912,6 @@ function MobilePWA({ tweaks }){
                   })}
                 </div>
 
-                {/* 보조 — 일본어 상품명 확인용 (저빈도) */}
                 <details style={{marginBottom:10}}>
                   <summary style={{fontSize:11, color:'var(--ink-3)', cursor:'pointer', padding:'4px 0'}}>
                     더 많은 검색 (아마존JP / 요도바시 / 구글)
@@ -830,47 +934,101 @@ function MobilePWA({ tweaks }){
                   </div>
                 </details>
 
+                {/* 액션 버튼들 */}
                 <div className="m-action-row" style={{marginBottom:0}}>
+                  <button className="m-btn accent" onClick={handleSendToExtension}
+                    title="확장(PC)으로 정보 전달 — 카톡으로 본인에게 보내거나 클립보드로 복사">
+                    <MIcon.download s={14}/> PC로 보내기
+                  </button>
                   <button className="m-btn primary" onClick={jumpToMargin}>
-                    ₩ 마진 계산
+                    ₩ 마진
                   </button>
                 </div>
-                <button className="m-btn" style={{fontSize:12, padding:'10px 12px', background:'transparent', color:'var(--ink-3)', marginTop:8}}
-                  onClick={() => { setScanned(null); setSearchQuery(''); setTagInfo(null); }}>
-                  스캔 결과 지우기
-                </button>
+
+                {/* OCR 원문 — 검수용 (저빈도) */}
+                {tagInfo?.rawText && (
+                  <details style={{marginTop:10}}>
+                    <summary style={{fontSize:10.5, color:'var(--ink-3)', cursor:'pointer'}}>OCR 원문 텍스트</summary>
+                    <pre style={{fontSize:10.5, color:'var(--ink-2)', whiteSpace:'pre-wrap', marginTop:6, fontFamily:'JetBrains Mono, monospace', maxHeight:120, overflow:'auto', padding:8, background:'var(--chip)', borderRadius:6}}>
+                      {tagInfo.rawText}
+                    </pre>
+                  </details>
+                )}
               </div>
             )}
 
-            {photos.length > 0 && (
-              <>
-                <div className="m-section-title">
-                  <span>촬영 ({photos.length}/6)</span>
-                  <button onClick={() => setPhotos([])}
-                    style={{border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer'}}>
-                    전체 삭제
-                  </button>
-                </div>
-                <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:6, marginTop:8}}>
-                  {photoUrls.map((u, i) => (
-                    <div key={i} style={{
-                      aspectRatio:'1', borderRadius:10, position:'relative',
-                      backgroundImage:`url(${u})`, backgroundSize:'cover', backgroundPosition:'center',
-                    }}>
-                      <div style={{
-                        position:'absolute', top:4, left:5,
-                        background:'rgba(0,0,0,.55)', color:'white', borderRadius:5,
-                        padding:'1px 5px', fontSize:9.5, fontWeight:600,
-                        fontFamily:'JetBrains Mono, monospace',
-                      }}>{i+1}</div>
-                    </div>
-                  ))}
-                </div>
-                <button className="m-btn" style={{marginTop:10}} onClick={downloadAllPhotos}>
-                  <MIcon.download/> 전체 다운로드
+            {/* 등록용 사진 — 갤러리/폰 카메라에서 추가 (PWA 라이브 캡처보다 화질 ↑) */}
+            <div className="m-section-title" style={{marginTop:photos.length || tagInfo || searchQuery ? 18 : 0}}>
+              <span>등록용 사진 ({photos.length}/6)</span>
+              {photos.length > 0 && (
+                <button onClick={() => setPhotos([])}
+                  style={{border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer'}}>
+                  전체 삭제
                 </button>
-              </>
+              )}
+            </div>
+
+            {/* 숨겨진 file input — 모바일에서 갤러리 + "사진 찍기" 옵션 자동 노출 */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{display:'none'}}
+              onChange={handleFileUpload}
+            />
+
+            {photos.length > 0 && (
+              <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:6, marginTop:8}}>
+                {photoUrls.map((u, i) => (
+                  <div key={i} style={{
+                    aspectRatio:'1', borderRadius:10, position:'relative',
+                    backgroundImage:`url(${u})`, backgroundSize:'cover', backgroundPosition:'center',
+                  }}>
+                    <div style={{
+                      position:'absolute', top:4, left:5,
+                      background:'rgba(0,0,0,.55)', color:'white', borderRadius:5,
+                      padding:'1px 5px', fontSize:9.5, fontWeight:600,
+                      fontFamily:'JetBrains Mono, monospace',
+                    }}>{i+1}</div>
+                    <button
+                      onClick={() => setPhotos(prev => prev.filter((_, idx) => idx !== i))}
+                      title="삭제"
+                      style={{
+                        position:'absolute', top:4, right:4,
+                        width:20, height:20, borderRadius:'50%', border:'none',
+                        background:'rgba(0,0,0,.6)', color:'white',
+                        fontSize:12, lineHeight:1, cursor:'pointer',
+                      }}>×</button>
+                  </div>
+                ))}
+              </div>
             )}
+
+            <div className="m-action-row" style={{marginTop:photos.length > 0 ? 10 : 4, marginBottom:0}}>
+              {/* 메인 — 갤러리 + 폰 기본 카메라 (화질·UX 최상) */}
+              <button
+                className={`m-btn ${photos.length === 0 ? 'primary' : ''}`}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={photos.length >= 6}
+                title="폰 갤러리 또는 기본 카메라로 사진 추가">
+                📁 사진 추가
+              </button>
+              {/* 다운로드 (사진 있을 때만) */}
+              {photos.length > 0 && (
+                <button className="m-btn" onClick={downloadAllPhotos}>
+                  <MIcon.download/> 받기
+                </button>
+              )}
+            </div>
+
+            <div style={{
+              marginTop:8, padding:'8px 12px', background:'var(--chip)', borderRadius:8,
+              fontSize:11, color:'var(--ink-3)', lineHeight:1.5,
+            }}>
+              💡 [PC로 보내기]를 누르면 카톡·에어드롭 등으로 사진과 URL을 함께 공유합니다 (지원 환경에서).
+              미지원이면 다운로드 후 직접 옮기세요.
+            </div>
           </>
         )}
 

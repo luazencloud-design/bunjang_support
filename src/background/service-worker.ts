@@ -65,6 +65,16 @@ chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
     forwardToBunjangTab(msg, 'category:options:result', sendResponse);
     return true;
   }
+
+  if (msg.type === 'prefill') {
+    // content script가 ?bjh_prefill= 감지 → 여기로 전달 → sidepanel로 브로드캐스트
+    // 사이드패널은 chrome.runtime.onMessage로 듣고 있음
+    console.log('[SW] prefill 수신 — sidepanel로 브로드캐스트', msg.data);
+    chrome.runtime.sendMessage(msg).catch(() => {
+      // 사이드패널이 닫혀 있으면 무시 (사용자가 다음에 열 때 받을 방법은 없음 — 큐는 Phase 8)
+    });
+    return false;
+  }
 });
 
 // ────────────────────────────────────────────────────────────────────

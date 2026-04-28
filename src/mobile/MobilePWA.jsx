@@ -391,6 +391,7 @@ function MobilePWA({ tweaks }){
   // 카메라/스캐너 ref
   const videoRef = useRef(null);
   const cameraStreamRef = useRef(null);
+  const fileInputRef = useRef(null);  // 갤러리/폰 카메라 파일 선택용 hidden input
 
   // ─── 환율 자동 갱신 (mount 시 + 6h 캐시) ───
   useEffect(() => {
@@ -509,6 +510,28 @@ function MobilePWA({ tweaks }){
     }
   }
 
+  // 파일 입력 (갤러리 + 폰 기본 카메라 호출) — PWA 라이브 캡처보다 화질·UX 좋음
+  // <input type=file accept=image/* multiple>: 모바일에서 "사진/동영상 라이브러리" + "사진 찍기" 옵션 제공
+  async function handleFileUpload(e) {
+    const files = [...(e.target.files || [])];
+    if (files.length === 0) return;
+    const remaining = Math.max(0, 6 - photos.length);
+    if (remaining === 0) {
+      showToast('이미 6장 — 일부 삭제 후 추가하세요');
+      return;
+    }
+    const accepted = files.slice(0, remaining);
+    setPhotos(prev => [...prev, ...accepted]);
+    showToast(
+      accepted.length < files.length
+        ? `${accepted.length}장 추가 (한도 6장 초과 ${files.length - accepted.length}장 제외)`
+        : `${accepted.length}장 추가됨 · ${photos.length + accepted.length}/6`
+    );
+    if (navigator.vibrate) navigator.vibrate(40);
+    // 같은 파일 다시 선택할 수 있게 input 초기화
+    e.target.value = '';
+  }
+
   async function handleCapturePhoto() {
     if (cameraState !== 'ready') {
       showToast('카메라가 활성화되지 않았습니다');
@@ -616,19 +639,37 @@ function MobilePWA({ tweaks }){
     const b64 = btoa(unescape(encodeURIComponent(json)));
     const url = `https://m.bunjang.co.kr/products/new?bjh_prefill=${b64}`;
 
-    // Web Share API 우선 (모바일 네이티브 공유 시트), 없으면 클립보드 폴백
+    // 사진을 함께 공유 시도 — Web Share API의 files 지원 (iOS 15+, Android Chrome)
+    // 지원되면 카톡/AirDrop으로 URL + 사진 한 번에 → PC가 둘 다 받음
+    const photoFiles = photos.map((blob, i) => {
+      const ext = (blob.type || 'image/jpeg').split('/')[1] || 'jpg';
+      return new File([blob], `photo-${Date.now()}-${i + 1}.${ext}`, { type: blob.type || 'image/jpeg' });
+    });
+
     if (navigator.share) {
+      const baseShare = {
+        title: '번장 등록 정보',
+        text: photos.length > 0
+          ? `PC에서 이 링크를 열면 폼이 자동 입력됩니다 (사진 ${photos.length}장 동봉)`
+          : 'PC에서 이 링크를 열면 폼이 자동 입력됩니다',
+        url,
+      };
+      // files 지원 여부 먼저 확인 — 미지원 환경에서 share 호출하면 throw
+      const withFiles = photoFiles.length > 0
+        && navigator.canShare
+        && navigator.canShare({ files: photoFiles });
       try {
-        await navigator.share({
-          title: '번장 등록 정보',
-          text: 'PC에서 이 링크를 열면 사이드패널에 자동 입력됩니다',
-          url,
-        });
-        showToast('공유 완료');
+        await navigator.share(withFiles ? { ...baseShare, files: photoFiles } : baseShare);
+        showToast(withFiles ? `공유 완료 (사진 ${photoFiles.length}장 포함)` : '공유 완료');
       } catch (e) {
         if (e?.name !== 'AbortError') {
-          // 사용자 취소가 아닌 진짜 에러면 클립보드로 폴백
-          await copyToClipboard(url);
+          // 진짜 에러 — files 거부 등 → 텍스트만 재시도, 그것도 실패면 클립보드
+          try {
+            await navigator.share(baseShare);
+            showToast('공유 완료 (사진은 따로 전송 필요)');
+          } catch (e2) {
+            if (e2?.name !== 'AbortError') await copyToClipboard(url);
+          }
         }
       }
     } else {
@@ -910,42 +951,78 @@ function MobilePWA({ tweaks }){
               </div>
             )}
 
-            {photos.length > 0 && (
-              <>
-                <div className="m-section-title">
-                  <span>촬영 사진 ({photos.length}/6)</span>
-                  <button onClick={() => setPhotos([])}
-                    style={{border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer'}}>
-                    전체 삭제
-                  </button>
-                </div>
-                <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:6, marginTop:8}}>
-                  {photoUrls.map((u, i) => (
-                    <div key={i} style={{
-                      aspectRatio:'1', borderRadius:10, position:'relative',
-                      backgroundImage:`url(${u})`, backgroundSize:'cover', backgroundPosition:'center',
-                    }}>
-                      <div style={{
-                        position:'absolute', top:4, left:5,
-                        background:'rgba(0,0,0,.55)', color:'white', borderRadius:5,
-                        padding:'1px 5px', fontSize:9.5, fontWeight:600,
-                        fontFamily:'JetBrains Mono, monospace',
-                      }}>{i+1}</div>
-                    </div>
-                  ))}
-                </div>
-                <button className="m-btn" style={{marginTop:10}} onClick={downloadAllPhotos}>
-                  <MIcon.download/> 전체 다운로드
+            {/* 등록용 사진 — 갤러리/폰 카메라에서 추가 (PWA 라이브 캡처보다 화질 ↑) */}
+            <div className="m-section-title" style={{marginTop:photos.length || tagInfo || searchQuery ? 18 : 0}}>
+              <span>등록용 사진 ({photos.length}/6)</span>
+              {photos.length > 0 && (
+                <button onClick={() => setPhotos([])}
+                  style={{border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer'}}>
+                  전체 삭제
                 </button>
-                <div style={{
-                  marginTop:8, padding:'8px 12px', background:'var(--chip)', borderRadius:8,
-                  fontSize:11, color:'var(--ink-3)', lineHeight:1.5,
-                }}>
-                  💡 사진은 PC로 직접 동기화 안 됩니다 (백엔드 큐는 차기 페이즈).
-                  지금은 다운로드 후 카톡·에어드롭 등으로 PC에 옮기세요.
-                </div>
-              </>
+              )}
+            </div>
+
+            {/* 숨겨진 file input — 모바일에서 갤러리 + "사진 찍기" 옵션 자동 노출 */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{display:'none'}}
+              onChange={handleFileUpload}
+            />
+
+            {photos.length > 0 && (
+              <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:6, marginTop:8}}>
+                {photoUrls.map((u, i) => (
+                  <div key={i} style={{
+                    aspectRatio:'1', borderRadius:10, position:'relative',
+                    backgroundImage:`url(${u})`, backgroundSize:'cover', backgroundPosition:'center',
+                  }}>
+                    <div style={{
+                      position:'absolute', top:4, left:5,
+                      background:'rgba(0,0,0,.55)', color:'white', borderRadius:5,
+                      padding:'1px 5px', fontSize:9.5, fontWeight:600,
+                      fontFamily:'JetBrains Mono, monospace',
+                    }}>{i+1}</div>
+                    <button
+                      onClick={() => setPhotos(prev => prev.filter((_, idx) => idx !== i))}
+                      title="삭제"
+                      style={{
+                        position:'absolute', top:4, right:4,
+                        width:20, height:20, borderRadius:'50%', border:'none',
+                        background:'rgba(0,0,0,.6)', color:'white',
+                        fontSize:12, lineHeight:1, cursor:'pointer',
+                      }}>×</button>
+                  </div>
+                ))}
+              </div>
             )}
+
+            <div className="m-action-row" style={{marginTop:photos.length > 0 ? 10 : 4, marginBottom:0}}>
+              {/* 메인 — 갤러리 + 폰 기본 카메라 (화질·UX 최상) */}
+              <button
+                className={`m-btn ${photos.length === 0 ? 'primary' : ''}`}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={photos.length >= 6}
+                title="폰 갤러리 또는 기본 카메라로 사진 추가">
+                📁 사진 추가
+              </button>
+              {/* 다운로드 (사진 있을 때만) */}
+              {photos.length > 0 && (
+                <button className="m-btn" onClick={downloadAllPhotos}>
+                  <MIcon.download/> 받기
+                </button>
+              )}
+            </div>
+
+            <div style={{
+              marginTop:8, padding:'8px 12px', background:'var(--chip)', borderRadius:8,
+              fontSize:11, color:'var(--ink-3)', lineHeight:1.5,
+            }}>
+              💡 [PC로 보내기]를 누르면 카톡·에어드롭 등으로 사진과 URL을 함께 공유합니다 (지원 환경에서).
+              미지원이면 다운로드 후 직접 옮기세요.
+            </div>
           </>
         )}
 

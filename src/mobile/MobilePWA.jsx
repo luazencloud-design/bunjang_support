@@ -402,6 +402,9 @@ function MobilePWA({ tweaks }){
   const [ocrLoading, setOcrLoading] = useState(false);
   // 백그라운드 SKU → 제품명 조회 진행 중 (lookupProductName)
   const [lookupLoading, setLookupLoading] = useState(false);
+  // 택 분석 직후 캡처된 사진 (Blob URL) — 카메라 영역에 오버레이로 표시
+  // null이면 라이브 카메라 그대로
+  const [capturedPreview, setCapturedPreview] = useState(null);
 
   // 시세 조회 결과 (Gemini grounding)
   const [priceSearch, setPriceSearch] = useState(null); // { quotes: [], sources: [] } | null
@@ -444,6 +447,13 @@ function MobilePWA({ tweaks }){
   useEffect(() => { saveJson(LS_KEY_FXMETA, fxMeta); }, [fxMeta]);
   useEffect(() => { saveJson(LS_KEY_HISTORY, history); }, [history]);
 
+  // 캡처 프리뷰 URL — 컴포넌트 unmount 또는 탭 이동 시 정리 (메모리 누수 방지)
+  useEffect(() => {
+    return () => {
+      if (capturedPreview) URL.revokeObjectURL(capturedPreview);
+    };
+  }, [capturedPreview]);
+
   // tagInfo 갱신 시 editedPayload 자동 리셋 (OCR 결과 새로 들어오면 편집값 초기화)
   useEffect(() => {
     if (!tagInfo) {
@@ -479,6 +489,11 @@ function MobilePWA({ tweaks }){
       }
       setCameraState('idle');
       retryCountRef.current = 0;
+      // 탭 이동 시 캡처 프리뷰도 정리 (메모리 + 다음 진입 시 라이브 카메라부터)
+      if (capturedPreview) {
+        URL.revokeObjectURL(capturedPreview);
+        setCapturedPreview(null);
+      }
       return;
     }
     let alive = true;
@@ -630,19 +645,12 @@ function MobilePWA({ tweaks }){
     e.target.value = '';
   }
 
-  async function handleCapturePhoto() {
-    if (cameraState !== 'ready') {
-      showToast('카메라가 활성화되지 않았습니다');
-      return;
-    }
-    const blob = await captureFrameToBlob(videoRef.current);
-    if (!blob) {
-      showToast('캡처 실패');
-      return;
-    }
-    setPhotos(prev => [...prev, blob].slice(-6));
-    showToast(`사진 저장됨 · ${Math.min(photos.length + 1, 6)}/6`);
-    if (navigator.vibrate) navigator.vibrate(40);
+  // 캡처 프리뷰 해제 — 재촬영 모드로 (카메라 다시 라이브)
+  function clearCapturedPreview() {
+    setCapturedPreview((url) => {
+      if (url) URL.revokeObjectURL(url);
+      return null;
+    });
   }
 
   // ── 택 분석 — Gemini Vision으로 사진에서 브랜드/모델/사이즈/가격 추출 ──
@@ -663,8 +671,12 @@ function MobilePWA({ tweaks }){
       showToast('사진 캡처 실패');
       return;
     }
+    // 카메라 영역에 캡처한 사진 오버레이 표시 (사용자가 무엇을 분석하는지 확인 가능)
+    // 기존 preview URL 있으면 정리 후 새로
+    if (capturedPreview) URL.revokeObjectURL(capturedPreview);
+    setCapturedPreview(URL.createObjectURL(blob));
     // 택 분석용 사진은 등록용(photos)에 추가 X — OCR 후 그대로 폐기
-    // 등록용 사진은 별도로 [📁 사진 추가] 또는 [📷 사진] 캡처 버튼으로
+    // 등록용 사진은 [📁 사진 추가]로만
     setOcrLoading(true);
     try {
       const info = await extractFromTagImage(blob, settings.geminiApiKey);
@@ -983,63 +995,76 @@ function MobilePWA({ tweaks }){
             <div className="m-scan">
               <video ref={videoRef} className="m-scan-video" autoPlay muted playsInline />
 
-              {cameraState === 'error' && (
+              {/* 캡처된 택 사진 오버레이 — 분석 후엔 라이브 카메라 가리고 사진 표시 */}
+              {capturedPreview && (
+                <img
+                  src={capturedPreview}
+                  alt="분석 중인 택 사진"
+                  style={{
+                    position:'absolute', inset:0, width:'100%', height:'100%',
+                    objectFit:'cover', zIndex:1, background:'#000',
+                  }}
+                />
+              )}
+
+              {cameraState === 'error' && !capturedPreview && (
                 <div className="m-scan-perm">
                   <div>카메라 권한이 거부됐거나 사용할 수 없습니다.</div>
                   <div style={{fontSize:11.5, opacity:.7}}>{cameraError}</div>
                   <button onClick={() => { setTab('margin'); setTimeout(()=>setTab('scan'), 50); }}>다시 시도</button>
                 </div>
               )}
-              {cameraState === 'permission' && (
+              {cameraState === 'permission' && !capturedPreview && (
                 <div className="m-scan-perm">카메라 권한 요청 중...</div>
               )}
 
-              {/* 카메라 영역 풀뷰 — 마스킹/가이드 제거 (사용자 요청)
-                  OCR도 풀프레임 분석이라 영역 가이드 불필요 */}
-
-              <div className="m-scan-overlay">
+              <div className="m-scan-overlay" style={{zIndex:2}}>
                 <div className="m-scan-top">
                   <div className="m-scan-pill">
                     <span className="live"/>
-                    {cameraState === 'ready' ? '카메라 준비' : cameraState === 'permission' ? '권한 요청 중' : '대기'}
+                    {capturedPreview
+                      ? '분석한 사진'
+                      : cameraState === 'ready' ? '카메라 준비'
+                      : cameraState === 'permission' ? '권한 요청 중' : '대기'}
                   </div>
                   <div style={{display:'flex', gap:6}}>
-                    <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환">
-                      <MIcon.flip/>
-                    </button>
+                    {!capturedPreview && (
+                      <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환">
+                        <MIcon.flip/>
+                      </button>
+                    )}
                   </div>
                 </div>
-                <div className="m-scan-bottom" style={{gap:14, alignItems:'center'}}>
-                  {/* 사진 추가 (왼쪽 보조) — 등록용 사진 캡처만, OCR 안 함 */}
+                <div className="m-scan-bottom" style={{justifyContent:'center', alignItems:'center'}}>
+                  {/* 메인 버튼 — 캡처 전: [택 분석], 캡처 후: [재촬영] */}
                   <button
-                    className="m-scan-btn"
-                    onClick={handleCapturePhoto}
-                    title="사진 추가 (등록용)"
-                    style={{width:54, height:54}}>
-                    <MIcon.camera s={20}/>
-                  </button>
-
-                  {/* 택 분석 (가운데, 메인) — OCR로 상품 정보 자동 채움 */}
-                  <button
-                    onClick={handleAnalyzeTag}
+                    onClick={capturedPreview ? clearCapturedPreview : handleAnalyzeTag}
                     disabled={ocrLoading}
-                    title="택 사진 분석 → 브랜드/모델/사이즈/가격 자동 추출"
+                    title={capturedPreview
+                      ? '재촬영 — 카메라로 돌아가서 다시 찍기'
+                      : '택 사진 분석 → 브랜드/모델/사이즈/가격 자동 추출'}
                     style={{
-                      width:74, height:74, borderRadius:'50%',
-                      background: ocrLoading ? 'rgba(255,255,255,.4)' : 'var(--accent)',
+                      width:84, height:84, borderRadius:'50%',
+                      background: ocrLoading
+                        ? 'rgba(255,255,255,.4)'
+                        : capturedPreview
+                          ? 'rgba(255,255,255,.95)'
+                          : 'var(--accent)',
                       border:'4px solid rgba(255,255,255,.35)',
-                      color:'white', fontFamily:'inherit',
+                      color: capturedPreview ? 'var(--ink)' : 'white',
+                      fontFamily:'inherit',
                       display:'flex', alignItems:'center', justifyContent:'center',
-                      fontSize: ocrLoading ? 24 : 12, fontWeight:700,
+                      fontSize: ocrLoading ? 28 : 13, fontWeight:700,
                       letterSpacing:'-.02em', lineHeight:1,
                       boxShadow: '0 4px 16px oklch(68% 0.15 45 / 0.4)',
                       opacity: ocrLoading ? 0.7 : 1,
                     }}>
-                    {ocrLoading ? '⏳' : <span>택<br/>분석</span>}
+                    {ocrLoading
+                      ? '⏳'
+                      : capturedPreview
+                        ? <span>재<br/>촬영</span>
+                        : <span>택<br/>분석</span>}
                   </button>
-
-                  {/* 자리맞춤용 빈 공간 */}
-                  <div style={{width:54}}/>
                 </div>
               </div>
             </div>
@@ -1078,7 +1103,7 @@ function MobilePWA({ tweaks }){
                         </span>
                       )}
                       <button
-                        onClick={() => { setTagInfo(null); setSearchQuery(''); }}
+                        onClick={() => { setTagInfo(null); setSearchQuery(''); clearCapturedPreview(); }}
                         style={{marginLeft:'auto', border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer', padding:'2px 6px'}}>
                         지우기
                       </button>

@@ -634,6 +634,33 @@ function SidePanel({ tweaks }){
       if (msg?.type === 'tab:url') {
         setCurrentUrl(msg.url);
         setIsBunjang(msg.isBunjang);
+        return;
+      }
+      if (msg?.type === 'prefill' && msg.data && msg.data.v === 1) {
+        // 모바일 PWA → URL 딥링크 → content script → 여기로
+        // 사용자 한 번 더 확인 (의도치 않은 덮어쓰기 방지)
+        const summary = msg.data.title || msg.data.brand || '(제목 없음)';
+        if (!confirm(`모바일에서 받은 정보로 폼을 채울까요?\n\n${summary}\n\n(현재 입력 중인 내용은 덮어씌워집니다)`)) {
+          return;
+        }
+        setProduct(p => ({
+          ...p,
+          title: msg.data.title || p.title,
+          brand: msg.data.brand || p.brand,
+          model: msg.data.model || p.model,
+          cost: msg.data.cost || p.cost,
+          costCurrency: msg.data.costCurrency || p.costCurrency,
+          price: msg.data.price || p.price,
+          priceCurrency: msg.data.priceCurrency || p.priceCurrency,
+        }));
+        setAiInputs(a => ({
+          brand: msg.data.brand || a.brand,
+          model: msg.data.model || a.model,
+          feature: msg.data.feature || a.feature,
+        }));
+        const photoNote = msg.data.photoCount ? ` · 폰에 사진 ${msg.data.photoCount}장 있음` : '';
+        showToast(`폼 자동 채움 완료${photoNote}`);
+        return;
       }
     };
     chrome.runtime.onMessage.addListener(onMessage);

@@ -12,6 +12,7 @@ import { BarcodeScanner } from '../lib/scanner';
 import { fetchFxRatesIfStale, fetchFxRates } from '../lib/fx';
 import { isValidJan } from '../lib/mercari';
 import { SITES, SITE_PRESETS, openSearchTab } from '../lib/search';
+import { extractFromTagImage } from '../lib/gemini';
 
 // ─── localStorage key ──────────────────────────────────────────────
 const LS_KEY_HISTORY    = 'bunjang-mobile:history';
@@ -26,6 +27,7 @@ const DEFAULT_SETTINGS = {
   shipping:  3500,
   feeRate:   0.06,
   costCurrency: 'KRW',  // 'JPY' | 'USD' | 'KRW' — 한국 매입이 기본 (필요 시 ¥/$로 변경)
+  geminiApiKey: '',     // Gemini API 키 (택 OCR용 — Google AI Studio에서 발급)
 };
 
 // ─── CSS ─────────────────────────────────────────────────────────────
@@ -365,6 +367,10 @@ function MobilePWA({ tweaks }){
   const [searchQuery, setSearchQuery] = useState('');
   const lastSavedQuery = useMemo(() => loadJson(LS_KEY_LAST_QUERY, ''), []);
 
+  // 택 OCR 결과 (Gemini Vision으로 추출한 상품 정보)
+  const [tagInfo, setTagInfo] = useState(null);  // { brand, model, size, color, price, currency, ... } | null
+  const [ocrLoading, setOcrLoading] = useState(false);
+
   const [toast, setToast] = useState(null);
   function showToast(msg) {
     setToast(msg);
@@ -482,6 +488,59 @@ function MobilePWA({ tweaks }){
     }
     setPhotos(prev => [...prev, blob].slice(-6));
     showToast(`사진 저장됨 · ${Math.min(photos.length + 1, 6)}/6`);
+  }
+
+  // ── 택 분석 — Gemini Vision으로 사진에서 브랜드/모델/사이즈/가격 추출 ──
+  async function handleAnalyzeTag() {
+    if (ocrLoading) return;
+    if (!scannerRef.current) {
+      showToast('카메라가 활성화되지 않았습니다');
+      return;
+    }
+    if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
+      showToast('설정에서 Gemini API 키를 입력하세요');
+      // 설정으로 즉시 이동하지 않고 사용자가 직접 가도록
+      return;
+    }
+    const blob = await scannerRef.current.capturePhoto();
+    if (!blob) {
+      showToast('사진 캡처 실패');
+      return;
+    }
+    // 캡처한 사진은 ocr 결과와 별개로 사진 목록에도 추가 (확장으로 보낼 때 사용)
+    setPhotos(prev => [...prev, blob].slice(-6));
+    setOcrLoading(true);
+    try {
+      const info = await extractFromTagImage(blob, settings.geminiApiKey);
+      setTagInfo(info);
+      // 검색어를 자동으로 "브랜드 + 모델"로 채우기
+      const composed = [info.brand, info.model].filter(Boolean).join(' ').trim();
+      if (composed) {
+        setSearchQuery(composed);
+        saveJson(LS_KEY_LAST_QUERY, composed);
+      }
+      // 가격 정보 있으면 마진 계산용 cost로도 채워주기
+      if (info.price && info.currency) {
+        setCost(info.price);
+        setCostCurrency(info.currency);
+      }
+      // scanned 카드도 노출 — 멀티 검색 버튼 보이게 (바코드 대신 OCR 결과 식별자로)
+      setScanned({
+        code: info.modelCode || info.model || info.brand || '(택 OCR)',
+        format: 'OCR',
+        ts: Date.now(),
+      });
+      showToast(`택 분석 완료 — ${composed || info.brand || '결과 확인'}`);
+      if (navigator.vibrate) navigator.vibrate(60);
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === 'GEMINI_NO_KEY') showToast('Gemini API 키 누락');
+      else if (msg.startsWith('GEMINI_HTTP_')) showToast('Gemini API 오류: ' + msg);
+      else if (msg === 'GEMINI_PARSE_ERROR') showToast('응답 파싱 실패 — 다시 시도하세요');
+      else showToast('택 분석 실패: ' + msg);
+    } finally {
+      setOcrLoading(false);
+    }
   }
 
   function handleSwitchCamera() {
@@ -613,11 +672,70 @@ function MobilePWA({ tweaks }){
                     <button className="m-scan-btn" onClick={handleSwitchCamera} title="카메라 전환"><MIcon.flip/></button>
                   </div>
                 </div>
-                <div className="m-scan-bottom">
+                <div className="m-scan-bottom" style={{gap:18, alignItems:'center'}}>
+                  {/* 택 분석 — Gemini Vision OCR (왼쪽) */}
+                  <button
+                    className="m-scan-btn"
+                    onClick={handleAnalyzeTag}
+                    disabled={ocrLoading}
+                    title="택 사진 분석으로 상품 정보 자동 채우기"
+                    style={{
+                      width:60, height:60,
+                      background: ocrLoading ? 'rgba(255,255,255,.3)' : 'var(--accent)',
+                      border:'1px solid rgba(255,255,255,.3)',
+                      fontSize:20, fontWeight:700,
+                      opacity: ocrLoading ? 0.6 : 1,
+                    }}>
+                    {ocrLoading ? '⏳' : '📷'}
+                  </button>
+
+                  {/* 사진 캡처 (가운데, 메인) */}
                   <button className="m-scan-capture" onClick={handleCapturePhoto} title="사진 캡처"/>
+
+                  {/* 자리맞춤용 빈 공간 (왼쪽 OCR 버튼과 대칭) */}
+                  <div style={{width:60}}/>
                 </div>
               </div>
             </div>
+
+            {/* 택 OCR 결과 카드 — scanned 카드보다 위에 표시 */}
+            {tagInfo && (
+              <div className="m-card" style={{borderColor:'var(--accent)', borderWidth:1.5}}>
+                <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:10}}>
+                  <span className="m-chip accent" style={{fontSize:11}}>📷 택 분석 결과</span>
+                  <button
+                    onClick={() => setTagInfo(null)}
+                    style={{marginLeft:'auto', border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer', padding:'2px 6px'}}>
+                    지우기
+                  </button>
+                </div>
+                {(tagInfo.brand || tagInfo.model) && (
+                  <div style={{fontSize:15, fontWeight:600, marginBottom:6, letterSpacing:'-.02em'}}>
+                    {[tagInfo.brand, tagInfo.model].filter(Boolean).join(' ')}
+                  </div>
+                )}
+                <div style={{display:'flex', flexWrap:'wrap', gap:5, marginBottom:tagInfo.rawText?10:0}}>
+                  {tagInfo.modelCode && <span className="m-chip">코드 {tagInfo.modelCode}</span>}
+                  {tagInfo.size && <span className="m-chip">사이즈 {tagInfo.size}</span>}
+                  {tagInfo.color && <span className="m-chip">{tagInfo.color}</span>}
+                  {tagInfo.price && tagInfo.currency && (
+                    <span className="m-chip success">
+                      {tagInfo.currency === 'KRW' ? '₩' : tagInfo.currency === 'JPY' ? '¥' : '$'}
+                      {tagInfo.price.toLocaleString()}
+                    </span>
+                  )}
+                  {tagInfo.category && <span className="m-chip">{tagInfo.category}</span>}
+                </div>
+                {tagInfo.rawText && (
+                  <details>
+                    <summary style={{fontSize:10.5, color:'var(--ink-3)', cursor:'pointer'}}>원문 OCR 텍스트</summary>
+                    <pre style={{fontSize:10.5, color:'var(--ink-2)', whiteSpace:'pre-wrap', marginTop:6, fontFamily:'JetBrains Mono, monospace', maxHeight:120, overflow:'auto', padding:8, background:'var(--chip)', borderRadius:6}}>
+                      {tagInfo.rawText}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            )}
 
             {scanned && (
               <div className="m-card">
@@ -718,7 +836,7 @@ function MobilePWA({ tweaks }){
                   </button>
                 </div>
                 <button className="m-btn" style={{fontSize:12, padding:'10px 12px', background:'transparent', color:'var(--ink-3)', marginTop:8}}
-                  onClick={() => { setScanned(null); setSearchQuery(''); }}>
+                  onClick={() => { setScanned(null); setSearchQuery(''); setTagInfo(null); }}>
                   스캔 결과 지우기
                 </button>
               </div>
@@ -866,6 +984,36 @@ function MobilePWA({ tweaks }){
                       onChange={e => setSettings(s => ({...s, feeRate: +e.target.value || 0}))}/>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            {/* Gemini API 키 — 택 OCR용 */}
+            <div className="m-section-title" style={{marginTop:18}}>
+              <span>Gemini API 키 (택 OCR)</span>
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener"
+                style={{fontSize:10, color:'var(--accent)', textDecoration:'none', fontWeight:600}}>
+                무료 발급 →
+              </a>
+            </div>
+            <div className="m-card" style={{padding:'12px 14px'}}>
+              <div className="m-field" style={{marginBottom:0}}>
+                <label style={{fontSize:11, color:'var(--ink-3)'}}>
+                  사진 OCR로 상품 정보 자동 추출 시 사용. 무료 1,500회/일.
+                </label>
+                <div className="m-num" style={{marginTop:6}}>
+                  <input
+                    type="password"
+                    placeholder="AIza..."
+                    value={settings.geminiApiKey || ''}
+                    onChange={e => setSettings(s => ({...s, geminiApiKey: e.target.value}))}
+                    style={{fontSize:13, fontFamily:'JetBrains Mono, monospace'}}
+                  />
+                </div>
+                {settings.geminiApiKey && (
+                  <div style={{fontSize:10, color:'var(--success)', marginTop:6}}>
+                    ✓ 키 저장됨 ({settings.geminiApiKey.length}자) — 스캔 탭의 📷 버튼으로 택 분석 가능
+                  </div>
+                )}
               </div>
             </div>
           </>

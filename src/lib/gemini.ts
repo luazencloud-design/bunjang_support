@@ -295,3 +295,163 @@ export async function generateTags(
 
   return tags;
 }
+
+// ────────────────────────────────────────────────────────────────────
+// 이미지 OCR — 택/라벨 사진에서 상품 정보 추출 (Gemini Vision)
+// PWA 매장 현장 도구용 — 바코드 대안
+// ────────────────────────────────────────────────────────────────────
+
+export interface TagInfo {
+  brand?: string;
+  model?: string;
+  modelCode?: string;       // 예: 'DH7568-100' (Nike SKU)
+  size?: string;            // 예: '260' / 'US 9' / 'M'
+  color?: string;
+  price?: number;
+  currency?: 'KRW' | 'JPY' | 'USD';
+  category?: string;        // 예: 'sneakers' / 'apparel' / 'cosmetics'
+  rawText: string;          // OCR 원본 (사용자 검수용)
+}
+
+const TAG_PROMPT = `당신은 상품 택/라벨 사진을 분석해서 구조화된 정보를 추출하는 OCR 전문가입니다.
+사진에서 보이는 모든 텍스트를 읽고, 그 중 상품 식별에 필요한 정보를 분류해서 JSON으로 반환하세요.
+
+[추출 대상]
+- brand: 브랜드명 (예: Nike, Adidas, Chanel)
+- model: 제품 모델명 (예: Air Force 1 Low, Stan Smith)
+- modelCode: 제품 코드/SKU (예: DH7568-100, ID2773) — 영문+숫자 조합
+- size: 사이즈 (한국 mm 또는 US/UK/EU 표기 그대로)
+- color: 색상명 (라벨에 표시된 그대로)
+- price: 가격 (숫자만, 통화 기호 제외)
+- currency: 가격 통화 — KRW/JPY/USD 중 하나
+- category: 추정 카테고리 — sneakers / apparel / cosmetics / electronics / accessories / other
+- rawText: 사진에서 읽은 모든 텍스트를 줄바꿈으로 구분 (검수용)
+
+[지침]
+- 정보가 사진에 명확히 보일 때만 채워라. 추측하지 마라.
+- 안 보이는 필드는 생략하거나 빈 문자열로
+- 가격이 \`₩45,000\` 형태면 price=45000, currency='KRW'
+- 가격이 \`¥8,900\` 또는 \`8,900円\` 형태면 price=8900, currency='JPY'
+- 가격이 \`$120\` 형태면 price=120, currency='USD'
+- 사이즈는 단위까지 (예: '260' 단독이면 한국식 mm, '260mm'면 그대로, 'US 9'면 'US 9')
+
+[출력 JSON 스키마]
+반드시 아래 스키마를 따르는 JSON만 반환. 다른 텍스트 포함 금지.
+{
+  "brand": "...",
+  "model": "...",
+  "modelCode": "...",
+  "size": "...",
+  "color": "...",
+  "price": 0,
+  "currency": "KRW",
+  "category": "...",
+  "rawText": "..."
+}`;
+
+/**
+ * Blob → base64 dataURL (헤더 없이 raw base64만)
+ */
+async function blobToBase64Raw(blob: Blob): Promise<string> {
+  const buf = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+/**
+ * 택/라벨 사진을 Gemini Vision에 보내서 상품 정보 자동 추출.
+ *
+ * @param imageBlob  카메라로 촬영한 사진 (image/jpeg 권장)
+ * @param apiKey     Gemini API 키
+ * @param modelName  'flash' (기본, 빠르고 저렴) | 'pro' (정확도 우선)
+ * @returns          구조화된 TagInfo
+ * @throws           GEMINI_NO_KEY | GEMINI_HTTP_* | GEMINI_PARSE_ERROR
+ */
+export async function extractFromTagImage(
+  imageBlob: Blob,
+  apiKey: string,
+  modelName: GeminiModel = 'flash',
+): Promise<TagInfo> {
+  if (!apiKey || apiKey.trim() === '') {
+    throw new Error('GEMINI_NO_KEY');
+  }
+
+  const model = MODEL_MAP[modelName];
+  const url = `${BASE_URL}/${model}:generateContent?key=${apiKey}`;
+
+  const base64 = await blobToBase64Raw(imageBlob);
+  const mimeType = imageBlob.type || 'image/jpeg';
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { text: TAG_PROMPT },
+          { inline_data: { mime_type: mimeType, data: base64 } },
+        ],
+      }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.2, // 정보 추출은 결정적이어야 — 창작 X
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    let msg = res.statusText;
+    try {
+      const errBody = await res.json() as { error?: { message?: string } };
+      if (errBody?.error?.message) msg = errBody.error.message;
+    } catch {}
+    throw new Error(`GEMINI_HTTP_${res.status}: ${msg}`);
+  }
+
+  const data = await res.json() as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
+
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (typeof text !== 'string' || text.trim() === '') {
+    throw new Error('GEMINI_PARSE_ERROR');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error('GEMINI_PARSE_ERROR');
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error('GEMINI_PARSE_ERROR');
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const result: TagInfo = {
+    rawText: typeof obj.rawText === 'string' ? obj.rawText : '',
+  };
+
+  // 옵셔널 필드 — 빈 문자열은 생략
+  const setStr = (k: keyof TagInfo, v: unknown) => {
+    if (typeof v === 'string' && v.trim() !== '') {
+      (result as unknown as Record<string, unknown>)[k as string] = v.trim();
+    }
+  };
+  setStr('brand', obj.brand);
+  setStr('model', obj.model);
+  setStr('modelCode', obj.modelCode);
+  setStr('size', obj.size);
+  setStr('color', obj.color);
+  setStr('category', obj.category);
+
+  if (typeof obj.price === 'number' && obj.price > 0) result.price = obj.price;
+  if (obj.currency === 'KRW' || obj.currency === 'JPY' || obj.currency === 'USD') {
+    result.currency = obj.currency;
+  }
+
+  return result;
+}

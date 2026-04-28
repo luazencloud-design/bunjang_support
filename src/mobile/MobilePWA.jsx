@@ -124,6 +124,24 @@ const mobileCss = `
     animation: pulse 1.4s ease-in-out infinite;
   }
   @keyframes pulse{ 50%{opacity:.4} }
+
+  /* 로딩 — 회전 spinner + 좌우 shimmer */
+  @keyframes m-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .m-spin { display: inline-block; animation: m-spin 1s linear infinite; }
+  @keyframes m-shimmer-bg {
+    0% { background-position: -100% 0; }
+    100% { background-position: 200% 0; }
+  }
+  .m-shimmer-bg {
+    background: linear-gradient(90deg,
+      var(--chip) 0%,
+      oklch(68% 0.15 45 / 0.18) 50%,
+      var(--chip) 100%);
+    background-size: 200% 100%;
+    animation: m-shimmer-bg 1.4s ease-in-out infinite;
+  }
+  .m-shimmer { animation: pulse 1.4s ease-in-out infinite; }
+
   /* m-scan-frame / m-scan-window / m-scan-line 제거 (사용자 요청 — 카메라 풀뷰) */
   .m-scan-bottom{ display: flex; justify-content: center; gap: 14px; }
   .m-scan-btn{
@@ -368,6 +386,8 @@ function MobilePWA({ tweaks }){
   // { title, brand, model, modelCode, feature } — null이면 기본값(tagInfo에서 파생)
   const [editedPayload, setEditedPayload] = useState(null);
   const [ocrLoading, setOcrLoading] = useState(false);
+  // 백그라운드 SKU → 제품명 조회 진행 중 (lookupProductName)
+  const [lookupLoading, setLookupLoading] = useState(false);
 
   // 시세 조회 결과 (Gemini grounding)
   const [priceSearch, setPriceSearch] = useState(null); // { quotes: [], sources: [] } | null
@@ -667,30 +687,27 @@ function MobilePWA({ tweaks }){
       } else if (info.brand && info.modelCode) {
         // 2순위: model 못 얻었지만 SKU 있음 → 우선 brand+SKU로 채워두고
         // 백그라운드에서 SKU → Google 검색으로 한국어 풀네임 조회 (색상/에디션 포함)
-        // 같은 데이브레이크라도 BV7725-700 = "베가스 골드 컬리지 오렌지" 식으로 SKU별 다 다름
         const fallback = `${info.brand} ${info.modelCode}`.trim();
         setSearchQuery(fallback);
         saveJson(LS_KEY_LAST_QUERY, fallback);
         showToast(`택 분석 — 제품명 자동 조회 중...`);
         if (navigator.vibrate) navigator.vibrate(60);
+        setLookupLoading(true);
         lookupProductName(info.brand, info.modelCode, settings.geminiApiKey)
           .then((lookup) => {
             if (!lookup || !lookup.fullName) return;
-            // fullName은 이미 브랜드 포함된 풀네임 (예: "나이키 데이브레이크 SP 베가스 골드 컬리지 오렌지")
-            // searchQuery에 그대로 사용 (brand 중복 X)
             setSearchQuery(lookup.fullName);
             saveJson(LS_KEY_LAST_QUERY, lookup.fullName);
-            // tagInfo도 풀네임으로 갱신 → 결과 카드 + PC로 보낼 정보에 반영
             setTagInfo((prev) => prev ? {
               ...prev,
               model: lookup.shortName || lookup.fullName,
               color: prev.color || lookup.colorway,
-              // 풀네임을 별도 필드로 (PC 등록 시 제목으로 사용 가능)
               fullName: lookup.fullName,
             } : prev);
             showToast(`제품명 보강 — ${lookup.fullName.length > 30 ? lookup.fullName.slice(0, 30) + '...' : lookup.fullName}`);
           })
-          .catch((err) => console.warn('[lookupProductName] 실패:', err));
+          .catch((err) => console.warn('[lookupProductName] 실패:', err))
+          .finally(() => setLookupLoading(false));
       } else if (info.brand) {
         setSearchQuery(info.brand);
         saveJson(LS_KEY_LAST_QUERY, info.brand);
@@ -999,6 +1016,23 @@ function MobilePWA({ tweaks }){
               </div>
             </div>
 
+            {/* 진행 중 배너 — OCR 또는 후속 lookup 진행 중일 때 명확한 시각 피드백 */}
+            {(ocrLoading || lookupLoading) && (
+              <div className="m-shimmer-bg" style={{
+                display:'flex', alignItems:'center', gap:10,
+                padding:'10px 14px', borderRadius:12, marginBottom:12,
+                fontSize:12.5, fontWeight:600, color:'var(--ink)',
+                border:'1px solid var(--accent)',
+              }}>
+                <span className="m-spin" style={{fontSize:16, color:'var(--accent)'}}>⟳</span>
+                <span>
+                  {ocrLoading
+                    ? '택 사진 분석 중... (OCR로 브랜드·모델·사이즈·가격 추출)'
+                    : '제품명 자동 조회 중... (SKU로 한국어 풀네임 보강)'}
+                </span>
+              </div>
+            )}
+
             {/* 택 분석 결과 + 검색 + 확장 전송 (하나의 카드에 통합) */}
             {(tagInfo || searchQuery) && (
               <div className="m-card" style={tagInfo ? {borderColor:'var(--accent)', borderWidth:1.5} : undefined}>
@@ -1007,6 +1041,14 @@ function MobilePWA({ tweaks }){
                   <>
                     <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:8}}>
                       <span className="m-chip accent" style={{fontSize:11}}>📷 택 분석 결과</span>
+                      {lookupLoading && (
+                        <span className="m-shimmer" style={{
+                          fontSize:10.5, color:'var(--accent)', fontWeight:600,
+                          display:'flex', alignItems:'center', gap:4,
+                        }}>
+                          <span className="m-spin">⟳</span> 제품명 조회 중
+                        </span>
+                      )}
                       <button
                         onClick={() => { setTagInfo(null); setSearchQuery(''); }}
                         style={{marginLeft:'auto', border:'none', background:'transparent', color:'var(--ink-3)', fontSize:11, cursor:'pointer', padding:'2px 6px'}}>
@@ -1045,7 +1087,8 @@ function MobilePWA({ tweaks }){
                   <label style={{fontSize:11, fontWeight:500, color:'var(--ink-2)', display:'block', marginBottom:4}}>
                     검색어 <span style={{color:'var(--ink-3)', fontWeight:400}}>(직접 편집 가능)</span>
                   </label>
-                  <div className="m-num" style={{padding:'2px 12px'}}>
+                  <div className={`m-num ${lookupLoading ? 'm-shimmer-bg' : ''}`}
+                    style={{padding:'2px 12px'}}>
                     <input
                       type="text"
                       value={searchQuery}
